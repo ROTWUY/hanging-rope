@@ -1,0 +1,41 @@
+{
+  "name": "hanging-rope",
+  "productName": "悬挂绳",
+  "version": "0.1.0",
+  "description": "悬挂绳 —— 常驻屏幕顶端的文件中转站，拖上去挂着，用的时候拖下来。",
+  "main": "src/main/main.js",
+  "author": "local",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "icons": "node scripts/gen-icons.js",
+    "test": "node test/run-tests.js",
+    "test:unit": "node test/run-tests.js unit",
+    "test:e2e": "node test/run-tests.js e2e",
+    "dist": "electron-builder --win --x64"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1"
+  },
+  "build": {
+    "appId": "com.local.hangingrope",
+    "productName": "HangingRope",
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "shortcutName": "悬挂绳"
+    }
+  }
+}

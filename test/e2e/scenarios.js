@@ -1,0 +1,968 @@
+/**
+ * 悬挂绳 —— Electron 端到端场景
+ *
+ * 用法（由 test/run-tests.js 调用，不建议手工直接跑）：
+ *   HR_SCENARIO=basic|restore|discard|shortcut
+ *   HANGING_ROPE_TEST_USERDATA=<临时目录>
+ *
+ * 说明：
+ *  · 真实系统拖放（startDrag）在自动化里会阻塞等待鼠标释放，因此用
+ *    HANGING_ROPE_TEST_DRY_DRAG 让主进程只记录载荷（dragLog）而不真的拖；
+ *    真实拖到微信/Word 属于手工验收项，见 DEVPLAN.md。
+ *  · HANGING_ROPE_TEST_FREEZE_WATCHER 冻结光标轮询，避免测试机光标位置干扰
+ *    窗口的唤出/收回，测试内用 __test.showRope()/hideRope() 显式驱动。
+ */
+'use strict';
+
+const path = require('node:path');
+const os = require('node:os');
+const fs = require('node:fs');
+const assert = require('node:assert/strict');
+const { app, BrowserWindow, clipboard, shell, screen } = require('electron');
+
+const ROOT = path.join(__dirname, '..', '..');
+const scenario = process.env.HR_SCENARIO || 'basic';
+const userData = process.env.HANGING_ROPE_TEST_USERDATA;
+
+if (!userData) {
+  console.error('[e2e] 缺少 HANGING_ROPE_TEST_USERDATA');
+  process.exit(2);
+}
+
+process.env.HANGING_ROPE_TEST_DRY_DRAG = '1';
+process.env.HANGING_ROPE_TEST_FREEZE_WATCHER = '1';
+
+require(path.join(ROOT, 'src', 'main', 'main.js'));
+const mainMod = require(path.join(ROOT, 'src', 'main', 'main.js'));
+const T = mainMod.__test;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+let failures = 0;
+let passes = 0;
+
+async function check(name, fn) {
+  try {
+    await fn();
+    passes++;
+    console.log('  \u2713 ' + name);
+  } catch (e) {
+    failures++;
+    console.log('  \u2717 ' + name + ' :: ' + (e && e.message ? e.message : e));
+  }
+}
+
+function js(win, code) {
+  return win.webContents.executeJavaScript(code, true);
+}
+
+const itemCount = (win) => js(win, 'document.querySelectorAll(".item").length');
+
+async function waitFor(label, fn, timeout = 8000) {
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      const v = await fn();
+      if (v) return v;
+    } catch {
+      /* 页面可能尚未就绪 */
+    }
+    if (Date.now() - t0 > timeout) throw new Error('等待超时：' + label);
+    await sleep(80);
+  }
+}
+
+/* 等设置窗口出现并加载完（主进程里设置是独立 BrowserWindow） */
+async function waitSettingsWindow() {
+  let sw = null;
+  for (let i = 0; i < 120 && !sw; i++) {
+    sw = T.getSettingsWindow();
+    if (!sw) await sleep(50);
+  }
+  if (!sw) throw new Error('设置窗口没有打开');
+  for (let i = 0; i < 120 && sw.webContents.isLoading(); i++) await sleep(80);
+  await sleep(400);
+  return sw;
+}
+
+const statePath = () => path.join(userData, 'state.json');function readState() {
+  return JSON.parse(fs.readFileSync(statePath(), 'utf8'));
+}
+
+/* ---------------- 场景：主流程 ---------------- */
+
+async function runBasic(win) {
+  const disp = screen.getPrimaryDisplay().bounds;
+
+  await check('AC-03 绳索宽度 = 主屏宽度 ÷ 3（误差 ≤4px）', () => {
+    const b = win.getBounds();
+    const expected = Math.round(disp.width / 3);
+    assert.ok(Math.abs(b.width - expected) <= 4, `实际 ${b.width}，期望 ${expected}`);
+  });
+
+  await check('AC-03 水平居中', () => {
+    const b = win.getBounds();
+    const center = b.x + b.width / 2;
+    assert.ok(Math.abs(center - (disp.x + disp.width / 2)) <= 2, `实际中心 ${center}`);
+  });
+
+  await check('AC-02 启动时完全不可见（y ≤ -210）', () => {
+    assert.ok(win.getBounds().y <= -209, 'y=' + win.getBounds().y);
+  });
+
+  await check('F3 空状态显示引导文案', async () => {
+    const hidden = await js(win, 'document.querySelector("#empty-hint").hidden');
+    assert.equal(hidden, false);
+  });
+
+  T.showRope();
+  await sleep(500);
+  await check('AC-04 唤出后贴住屏幕顶端（y = 0）', () => {
+    assert.equal(win.getBounds().y, 0);
+  });
+
+  /* --- 悬挂 --- */
+  const text = '测试文字：周四 14:00 与产品组同步。';
+  await js(win, `rope.addText(${JSON.stringify(text)})`);
+  await waitFor('文字挂件', async () => (await itemCount(win)) === 1);
+  await check('AC-07 文字挂件渲染并显示内容预览', async () => {
+    const ok = await js(
+      win,
+      `(() => { const el = document.querySelector('.item.t-text'); return !!el && el.querySelector('.text-preview').textContent.includes('测试文字'); })()`
+    );
+    assert.equal(ok, true);
+  });
+
+  await js(win, `rope.addText(${JSON.stringify('x'.repeat(50001))})`);
+  await sleep(500);
+  await check('AC-09 超长文字被拒绝且给出提示', async () => {
+    assert.equal(await itemCount(win), 1, '不应新增挂件');
+    const toast = await js(win, 'document.querySelector("#toast").textContent');
+    assert.match(toast, /太长/);
+  });
+
+  const iconPath = path.join(ROOT, 'assets', 'icon.png');
+  await js(win, `rope.addPaths(${JSON.stringify([iconPath])})`);
+  await waitFor('图片文件挂件', async () => (await itemCount(win)) === 2);
+  await check('AC-07 图片文件显示为直接预览（不是 PNG 文字卡）', async () => {
+    const info = await js(
+      win,
+      `(() => { const els=[...document.querySelectorAll('.item')]; const el=els.find(n=>n.classList.contains('t-image')); return { cls: el ? el.className : '', img: el ? !!el.querySelector('img') : false }; })()`
+    );
+    assert.ok(info.cls.includes('t-image'), '应带 t-image 类');
+    assert.equal(info.img, true, '应渲染 <img> 预览');
+  });
+
+  const folderPath = path.join(ROOT, 'src');
+  await js(win, `rope.addPaths(${JSON.stringify([folderPath])})`);
+  await waitFor('文件夹挂件', async () => (await itemCount(win)) === 3);
+  await check('AC-07 文件夹挂件渲染', async () => {
+    const n = await js(win, 'document.querySelectorAll(".item.t-folder").length');
+    assert.equal(n, 1);
+  });
+
+  /* --- 持久化 --- */
+  await sleep(500);
+  await check('AC-33 变更后 state.json 立即更新（3 件）', () => {
+    const s = readState();
+    assert.equal(s.items.length, 3);
+  });
+  await check('AC-08 文件项只存路径，不存副本/字节', () => {
+    const s = readState();
+    const it = s.items.find((i) => i.type === 'file');
+    assert.ok(it.path.startsWith(ROOT), '应记录原路径');
+    assert.equal(it.cachePath, undefined);
+    assert.equal(it.bytes, undefined);
+  });
+  await check('F2 文字内容随记录落盘', () => {
+    const s = readState();
+    const it = s.items.find((i) => i.type === 'text');
+    assert.equal(it.text, text);
+  });
+
+  /* --- 网页图片：svg+xml 不能再变成 .svgxml（AC-37 / AC-38） --- */
+  const svgBody =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120"><rect width="240" height="120" fill="#e2a34a"/></svg>';
+  const svgDataUrl = 'data:image/svg+xml;base64,' + Buffer.from(svgBody).toString('base64');
+  const beforeSvg = await itemCount(win);
+  await js(win, `rope.addImageUrl(${JSON.stringify(svgDataUrl)}, '网页配图')`);
+  await waitFor('网页 svg 挂件', async () => (await itemCount(win)) === beforeSvg + 1);
+
+  const svgItem = await js(
+    win,
+    '(async () => { const s = await rope.getState(); return s.items[s.items.length - 1]; })()'
+  );
+  await check('AC-37 网页 SVG 以 .svg 扩展名落地（不是 .svgxml）', () => {
+    assert.match(svgItem.cachePath, /\.svg$/, '实际路径：' + svgItem.cachePath);
+    assert.equal(svgItem.name, '网页配图');
+    assert.equal(svgItem.width, 240, '应从 SVG 读出宽度');
+    assert.equal(svgItem.height, 120);
+  });
+
+  const rendered = await waitFor('SVG 缩略图渲染', async () =>
+    js(
+      win,
+      `(() => {
+        const el = document.querySelector('.item[data-id="${svgItem.id}"]');
+        if (!el) return false;
+        const img = el.querySelector('.thumb img');
+        if (!img || !img.complete || !img.naturalWidth) return false;
+        return { w: img.naturalWidth, h: img.naturalHeight, broken: !!el.querySelector('.thumb-broken') };
+      })()`
+    )
+  );
+  await check('AC-37 卡片里真的画出图（naturalWidth > 0，无破图占位）', () => {
+    assert.ok(rendered.w > 0, 'naturalWidth=' + rendered.w);
+    assert.equal(rendered.broken, false);
+  });
+
+  /* CDN 常把图片报成 application/octet-stream 或干脆报错类型：
+     扩展名以字节为准，不能被 mime 带偏 */
+  const beforeLiar = await itemCount(win);
+  await js(
+    win,
+    `(() => {
+      const bytes = new TextEncoder().encode(${JSON.stringify(svgBody)});
+      rope.addImageBuffer(bytes, '', { mime: 'image/png', name: 'img_mwau6kh0_66f704f6e4fa2af5bc98.png' });
+      return true;
+    })()`
+  );
+  await waitFor('mime 撒谎的图片挂件', async () => (await itemCount(win)) === beforeLiar + 1);
+  const liarItem = await js(
+    win,
+    '(async () => { const s = await rope.getState(); return s.items[s.items.length - 1]; })()'
+  );
+  await check('AC-37 mime 撒谎（image/png）但内容是 SVG：仍按 .svg 落地', () => {
+    assert.match(liarItem.cachePath, /\.svg$/, '实际：' + liarItem.cachePath);
+  });
+  await check('旧记录里的哈希缓存名在卡片上显示为人话（图片 · SVG）', async () => {
+    const label = await js(
+      win,
+      `(() => { const el = document.querySelector('.item[data-id="${liarItem.id}"]'); return el ? el.querySelector('.name').textContent : ''; })()`
+    );
+    assert.equal(label, '图片 · SVG');
+  });
+
+  const beforeJunk = await itemCount(win);
+  await js(
+    win,
+    `rope.addImageUrl(${JSON.stringify(
+      'data:text/html;base64,' + Buffer.from('<html><body>403 Forbidden</body></html>').toString('base64')
+    )})`
+  );
+  await sleep(600);
+  await check('AC-38 抓到的不是图片（如防盗链 403 页面）就不悬挂，并提示失败', async () => {
+    assert.equal(await itemCount(win), beforeJunk, '不应新增挂件');
+    const t = await js(win, 'document.querySelector("#toast").textContent');
+    assert.match(t, /抓取失败|不是图片/);
+  });
+
+  /* --- 文件夹浏览 --- */
+  await check('AC-15 目录读取：返回条目且文件夹优先', async () => {
+    const res = await js(win, `rope.listFolder(${JSON.stringify(folderPath)})`);
+    assert.equal(res.ok, true);
+    assert.ok(res.entries.length >= 3, '应有多个条目');
+    assert.ok(res.entries.every((e) => e.path && typeof e.isDir === 'boolean'));
+  });
+
+  await js(
+    win,
+    `(() => { const el=[...document.querySelectorAll('.item')].find(n=>n.classList.contains('t-folder')); el.dispatchEvent(new MouseEvent('mouseenter')); return true; })()`
+  );
+  await sleep(700);
+
+  const panel = await js(
+    win,
+    `(() => {
+      const p = document.querySelector('#folder-panel');
+      return {
+        hidden: p.hidden,
+        rows: p.querySelectorAll('.fp-row').length,
+        sel: p.querySelectorAll('.fp-row.sel').length,
+        counter: (p.querySelector('.fp-counter') || {}).textContent || '',
+        strip: getComputedStyle(document.querySelector('#shell'), '::before').height,
+        thumbs: p.querySelectorAll('.fp-row-thumb').length,
+      };
+    })()`
+  );
+
+  await check('AC-15 面板展开：竖排 3 行、每行有缩略图位', () => {
+    assert.equal(panel.hidden, false);
+    assert.equal(panel.rows, 3);
+    assert.equal(panel.thumbs, 3);
+  });
+  await check('AC-15 表头显示 n / m 且选中行高亮', () => {
+    assert.match(panel.counter, /^\d+ \/ \d+$/);
+    assert.equal(panel.sel, 1);
+  });
+  await check('AC-18 绳索条背景固定 210px（不随窗口变高放大）', () => {
+    assert.equal(panel.strip, '210px');
+  });
+
+  const heightExpanded = win.getBounds().height;
+  await check('F5 展开面板时窗口变高以容纳面板', () => {
+    assert.ok(heightExpanded >= 400, 'height=' + heightExpanded);
+  });
+
+  /* AC-17：在列表行上按住拖动 → 发起对外拖出（dry-run 只校验载荷） */
+  const dragLogBeforeRow = T.dragLog.length;
+  const rowTarget = await js(
+    win,
+    `(async () => {
+      const row = document.querySelector('#folder-panel .fp-row');
+      const r = row.getBoundingClientRect();
+      const mk = (x, y) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 2, pointerType: 'mouse', isPrimary: true });
+      row.dispatchEvent(new PointerEvent('pointerdown', mk(r.left + 30, r.top + 20)));
+      await new Promise((res) => setTimeout(res, 40));
+      document.dispatchEvent(new PointerEvent('pointermove', mk(r.left + 90, r.top + 20)));
+      document.dispatchEvent(new PointerEvent('pointerup', mk(r.left + 90, r.top + 20)));
+      return true;
+    })()`
+  );
+  await sleep(400);
+  await check('AC-17 文件夹列表行按住拖动可拖出该文件本体', () => {
+    assert.ok(T.dragLog.length > dragLogBeforeRow, '应记录到一次拖出载荷');
+    const last = T.dragLog[T.dragLog.length - 1];
+    assert.ok(last.target, '应有目标路径');
+    assert.ok(last.target.startsWith(folderPath), '目标应位于该文件夹内：' + last.target);
+    assert.notEqual(last.target, folderPath, '不应是文件夹本身');
+    assert.equal(rowTarget, true);
+  });
+
+  /* 计数基线紧贴滚轮前取：中间若有重渲染（拖出会刷新列表）会让旧快照失效，
+     那样这条用例就会偶尔“假失败”，和产品行为无关。 */
+  const counterBefore = await js(win, 'document.querySelector("#folder-panel .fp-counter").textContent');
+  await js(
+    win,
+    `(() => { const p=document.querySelector('#folder-panel'); p.dispatchEvent(new WheelEvent('wheel',{deltaY:120,bubbles:true,cancelable:true})); return true; })()`
+  );
+  await sleep(200);
+  const counterAfter = await js(win, 'document.querySelector("#folder-panel .fp-counter").textContent');
+  await check('AC-16 滚轮切换选中项，计数同步变化', () => {
+    assert.notEqual(counterAfter, counterBefore, `滚动前后计数应不同：${counterBefore} → ${counterAfter}`);
+    assert.match(counterAfter, /^\d+ \/ \d+$/);
+  });
+
+  await js(
+    win,
+    `(() => { const el=[...document.querySelectorAll('.item')].find(n=>n.classList.contains('t-folder')); el.dispatchEvent(new MouseEvent('mouseleave')); return true; })()`
+  );
+  await sleep(500);
+  await check('AC-15 移开鼠标后面板收起', async () => {
+    assert.equal(await js(win, 'document.querySelector("#folder-panel").hidden'), true);
+  });
+
+  /* --- 文件夹面板里的 📌：把子文件夹固定到绳上（AC-44~46） ---
+     用独立临时夹具目录，避免依赖 src 下恰好有"文件夹 + 文件"混排。 */
+  const pinRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-pin-'));
+  fs.mkdirSync(path.join(pinRoot, '子文件夹A'));
+  fs.mkdirSync(path.join(pinRoot, '子文件夹B'));
+  fs.writeFileSync(path.join(pinRoot, '说明.txt'), 'pin fixture');
+  await js(win, `rope.addPaths(${JSON.stringify([pinRoot])})`);
+  await sleep(500);
+  await js(
+    win,
+    `(() => { const els=[...document.querySelectorAll('.item.t-folder')]; els[els.length-1].dispatchEvent(new MouseEvent('mouseenter')); return true; })()`
+  );
+  await sleep(700);
+
+  const pinView = await js(
+    win,
+    `(() => {
+      const p = document.querySelector('#folder-panel');
+      const rows = [...p.querySelectorAll('.fp-row')];
+      const first = rows[0];
+      const pin = first && first.querySelector('.fp-pin');
+      return {
+        hidden: p.hidden,
+        rows: rows.map((r) => ({
+          name: r.querySelector('.fp-row-name').textContent,
+          dir: !!r.querySelector('.fp-row-thumb .folder-shape'),
+          pin: !!r.querySelector('.fp-pin'),
+          slot: !!r.querySelector('.fp-pin-slot'),
+        })),
+        align: pin ? (() => {
+          const rr = first.getBoundingClientRect(), br = pin.getBoundingClientRect();
+          return {
+            gap: Math.round(rr.right - br.right),
+            midDiff: Math.round(Math.abs((rr.top + rr.bottom) / 2 - (br.top + br.bottom) / 2)),
+          };
+        })() : null,
+      };
+    })()`
+  );
+
+  await check('AC-44 子文件夹行右侧有 📌，文件行只留同宽占位（缩略图仍对齐）', () => {
+    assert.equal(pinView.hidden, false);
+    const dirs = pinView.rows.filter((r) => r.dir);
+    const files = pinView.rows.filter((r) => !r.dir);
+    assert.ok(dirs.length >= 2, '应至少两行文件夹：' + JSON.stringify(pinView.rows));
+    assert.ok(dirs.every((r) => r.pin && !r.slot), '文件夹行应有 📌');
+    assert.ok(files.length >= 1, '应有一行文件：' + JSON.stringify(pinView.rows));
+    assert.ok(files.every((r) => !r.pin && r.slot), '文件行不该有 📌，只留占位');
+  });
+
+  await check('AC-44 📌 贴在行右侧且与行垂直居中', () => {
+    assert.ok(pinView.align.gap >= 0 && pinView.align.gap <= 12, '右侧留白 ' + pinView.align.gap);
+    assert.ok(pinView.align.midDiff <= 2, '垂直偏差 ' + pinView.align.midDiff);
+  });
+
+  /* 📌 在行内，但按下它不能启动"按住行拖动 = 拖出"。
+     先等上一步（AC-17）拖出的 2.5s ui.nativeDrag 保护窗口过去，
+     否则行按下会被直接忽略，这条用例就测不到东西了。 */
+  await sleep(2600);
+  const dragLogBeforePin = T.dragLog.length;
+  await js(
+    win,
+    `(async () => {
+      const pin = document.querySelector('#folder-panel .fp-pin');
+      const r = pin.getBoundingClientRect();
+      const mk = (x, y) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 7, pointerType: 'mouse', isPrimary: true });
+      pin.dispatchEvent(new PointerEvent('pointerdown', mk(r.left + 8, r.top + 8)));
+      document.dispatchEvent(new PointerEvent('pointermove', mk(r.left + 8, r.top + 150)));
+      document.dispatchEvent(new PointerEvent('pointerup', mk(r.left + 8, r.top + 150)));
+      await new Promise((res) => setTimeout(res, 350));
+      return true;
+    })()`
+  );
+  await sleep(200);
+  await check('AC-46 在 📌 上按住拖动不会拖出该行内容', () => {
+    assert.equal(T.dragLog.length, dragLogBeforePin, '不应产生拖出载荷');
+  });
+
+  const pinBefore = await js(win, 'rope.getState().then((s) => s.items.length)');
+  const pinned = await js(
+    win,
+    `(async () => {
+      const pin = document.querySelector('#folder-panel .fp-pin');
+      const name = pin.closest('.fp-row').querySelector('.fp-row-name').textContent;
+      pin.click();
+      await new Promise((r) => setTimeout(r, 700));
+      const st = await rope.getState();
+      return {
+        name,
+        items: st.items.map((i) => ({ type: i.type, name: i.name, path: i.path })),
+        pinOn: !!document.querySelector('#folder-panel .fp-pin.on'),
+        panelOpen: !document.querySelector('#folder-panel').hidden,
+      };
+    })()`
+  );
+
+  await check('AC-45 点 📌 把该子文件夹固定到绳上（只引用路径）', () => {
+    assert.equal(pinned.items.length, pinBefore + 1, '应新增一个挂件');
+    const added = pinned.items.find((i) => i.path === path.join(pinRoot, pinned.name));
+    assert.ok(added, '应能找到新挂件：' + JSON.stringify(pinned.items.map((i) => i.path)));
+    assert.equal(added.type, 'folder');
+    assert.equal(added.name, pinned.name);
+    assert.equal(pinned.pinOn, true, '📌 应变为已固定状态');
+  });
+
+  await check('AC-45 固定后面板保持打开（可以接着钉别的）', () => {
+    assert.equal(pinned.panelOpen, true);
+  });
+
+  const dupCount = await js(win, 'rope.getState().then((s) => s.items.length)');
+  await js(
+    win,
+    `(async () => { document.querySelector('#folder-panel .fp-pin').click(); await new Promise((r) => setTimeout(r, 600)); return true; })()`
+  );
+  await sleep(200);
+  await check('AC-45 同一子文件夹再点 📌 不重复添加，只提示"已经在绳上了"', async () => {
+    assert.equal(await js(win, 'rope.getState().then((s) => s.items.length)'), dupCount);
+    const t = await js(win, 'document.querySelector("#toast").textContent');
+    assert.match(t, /已经在绳上了/);
+  });
+
+  /* 收尾：收起面板、摘掉临时夹具挂件、删掉临时目录，避免影响后续用例 */
+  await js(
+    win,
+    `(() => { const els=[...document.querySelectorAll('.item.t-folder')]; els[els.length-1].dispatchEvent(new MouseEvent('mouseleave')); return true; })()`
+  );
+  await sleep(500);
+  const pinIds = await js(
+    win,
+    `rope.getState().then((s) => s.items.filter((i) => (i.path || '').startsWith(${JSON.stringify(
+      pinRoot
+    )})).map((i) => i.id))`
+  );
+  for (const id of pinIds) await js(win, `rope.removeItem(${JSON.stringify(id)})`);
+  await sleep(400);
+  fs.rmSync(pinRoot, { recursive: true, force: true });
+
+  /* --- 排序持久化 --- */
+  const idsBefore = await js(win, 'rope.getState().then(s => s.items.map(i => i.id))');
+  const reversed = idsBefore.slice().reverse();
+  await js(win, `rope.reorder(${JSON.stringify(reversed)})`);
+  await sleep(500);
+  await check('AC-20 排序结果落盘且顺序一致', async () => {
+    const now = await js(win, 'rope.getState().then(s => s.items.map(i => i.id))');
+    assert.deepEqual(now, reversed);
+    assert.deepEqual(readState().items.map((i) => i.id), reversed);
+  });
+
+  /* --- 文字拖出内容 --- */
+  await check('AC-13 文字挂件 dragstart 携带 text/plain 原文', async () => {
+    const got = await js(
+      win,
+      `(() => {
+        const el = document.querySelector('.item.t-text');
+        const dt = new DataTransfer();
+        el.dispatchEvent(new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt }));
+        const v = dt.getData('text/plain');
+        el.dispatchEvent(new DragEvent('dragend', { bubbles: true, cancelable: true, dataTransfer: dt }));
+        return v;
+      })()`
+    );
+    assert.equal(got, text);
+  });
+
+  /* --- 排序手势与防闪烁 --- */
+  // 上一步的行拖出会把 ui.nativeDrag 置位（拖出兜底 2.5s），等它复位再做手势
+  await waitFor('拖出标记复位', () => js(win, 'ui.nativeDrag === false'), 8000);
+  const flick = await js(
+    win,
+    `(async () => {
+      const el = document.querySelector('.item:not(.t-text)');
+      const r = el.getBoundingClientRect();
+      const mk = (x, y) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true });
+      el.dispatchEvent(new PointerEvent('pointerdown', mk(r.left + 20, r.top + 20)));
+      const before = { press: !!ui.press, reorder: !!ui.reorder, native: ui.nativeDrag, connected: el.isConnected };
+      // 等抬起：定时器 150ms，渲染进程忙时可能被推迟，留足余量
+      await new Promise((res) => setTimeout(res, 420));
+      const samples = [];
+      // 位移按“被拖卡片宽度 + 间距”算：图片卡（120px）与文件卡（86px）宽度不同，
+      // 写死像素会在图片卡上跨不过相邻卡片的中心，导致顺序根本不换位
+      const step = r.width + 16;
+      for (const k of [0.3, 0.9, 1.6, 0.9, 0.3, 0]) {
+        document.dispatchEvent(new PointerEvent('pointermove', mk(r.left + 20 + step * k, r.top + 20)));
+        await new Promise((res) => setTimeout(res, 50));
+        const lifted = document.querySelector('.item.lifting');
+        samples.push({
+          lifted: !!lifted,
+          opacity: lifted ? getComputedStyle(lifted).opacity : '',
+          anims: lifted ? lifted.getAnimations().length : -1,
+          order: [...document.querySelectorAll('.item')].map((n) => n.dataset.id).join(','),
+        });
+      }
+      document.dispatchEvent(new PointerEvent('pointerup', mk(r.left + 20, r.top + 20)));
+      return { samples, before, width: r.width, cls: el.className };
+    })()`
+  );
+
+  await check('AC-19 按住 0.15 秒出现"抬起"效果', () => {
+    assert.ok(flick.samples.some((s) => s.lifted), '应有 lifting 状态：' + JSON.stringify(flick));
+  });
+  await check('AC-22 排序全程卡片不透明度为 1（无闪烁）', () => {
+    const lifted = flick.samples.filter((s) => s.lifted);
+    assert.ok(lifted.length >= 3, '应采集到多次抬起样本：' + JSON.stringify(flick));
+    for (const s of lifted) assert.equal(s.opacity, '1');
+  });
+  await check('AC-22 排序期间无动画重播（getAnimations = 0）', () => {
+    for (const s of flick.samples.filter((x) => x.lifted)) assert.equal(s.anims, 0);
+  });
+  await check('AC-20 横向拖动过程中顺序跟随指针变化', () => {
+    const orders = new Set(flick.samples.filter((s) => s.lifted).map((s) => s.order));
+    assert.ok(orders.size >= 2, '顺序应随指针变化');
+  });
+
+  /* --- 取件模式 --- */
+  await js(win, `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`);
+  await sleep(200);
+  await check('AC-23 按住 Esc 进入取件模式（红边提示 + 顶部提示条）', async () => {
+    const st = await js(
+      win,
+      `({ mode: document.body.classList.contains('remove-mode'), hint: !document.querySelector('#remove-hint').hidden, badge: getComputedStyle(document.querySelector('.item'), '::after').content })`
+    );
+    assert.equal(st.mode, true);
+    assert.equal(st.hint, true);
+    assert.match(String(st.badge), /取下/);
+  });
+
+  const countBeforeRemove = await itemCount(win);
+  await js(win, `document.querySelector('.item').click()`);
+  await waitFor('第一件取下', async () => (await itemCount(win)) === countBeforeRemove - 1);
+  await js(win, `document.querySelector('.item').click()`);
+  await waitFor('第二件取下', async () => (await itemCount(win)) === countBeforeRemove - 2);
+  await check('AC-23/AC-24 按住期间可连续点击取下多件', async () => {
+    assert.equal(await itemCount(win), countBeforeRemove - 2);
+  });
+
+  await js(win, `window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', bubbles: true }))`);
+  await sleep(200);
+  await check('AC-25 松开 Esc 自动退出取件模式', async () => {
+    const st = await js(
+      win,
+      `({ mode: document.body.classList.contains('remove-mode'), hint: document.querySelector('#remove-hint').hidden })`
+    );
+    assert.equal(st.mode, false);
+    assert.equal(st.hint, true);
+  });
+
+  const countBeforeDbl = await itemCount(win);
+  await js(win, `document.querySelector('.item').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+  await sleep(300);
+  await check('AC-26 取件模式退出后双击不会误删', async () => {
+    assert.equal(await itemCount(win), countBeforeDbl);
+  });
+
+  /* --- 复制即悬挂 --- */
+  await js(win, 'document.querySelector("#copy-pill").click()');
+  await sleep(300);
+  await check('AC-27 点击胶囊开启"复制即悬挂"并高亮', async () => {
+    const st = await js(
+      win,
+      '(async () => ({ on: document.querySelector("#copy-pill").classList.contains("on"), copy: (await rope.getState()).copyMode }))()'
+    );
+    assert.equal(st.on, true);
+    assert.equal(st.copy, true);
+  });
+
+  T.showRope();
+  await sleep(300);
+  clipboard.writeText('剪贴板文字-唯一内容-A1');
+  T.onPastePressed();
+  await sleep(500);
+  const afterPaste = await itemCount(win);
+  await check('AC-30 悬停绳索时 Ctrl+V 把剪贴板文字挂上', () => {
+    assert.ok(afterPaste >= countBeforeDbl + 1, '应新增一件');
+  });
+
+  T.onPastePressed();
+  await sleep(500);
+  await check('AC-29 重复粘贴同样内容不会重复悬挂', async () => {
+    assert.equal(await itemCount(win), afterPaste);
+  });
+
+  /* AC-28：资源管理器"复制文件"（FileNameW）自动悬挂 */
+  const clipFile = path.join(userData, 'clip-file.txt');
+  fs.writeFileSync(clipFile, 'clip');
+  let clipFormatOk = true;
+  try {
+    clipboard.writeBuffer('FileNameW', Buffer.from(clipFile + '\0', 'utf16le'));
+  } catch {
+    clipFormatOk = false;
+  }
+  await check('样本准备：把文件写入剪贴板（FileNameW 格式）', () => {
+    assert.equal(clipFormatOk, true, '当前 Electron 不支持写入 FileNameW');
+  });
+  if (clipFormatOk) {
+    const beforeClip = await itemCount(win);
+    T.onPastePressed();
+    await sleep(600);
+    await check('AC-28 复制文件后可自动悬挂（不是把路径当文字）', async () => {
+      assert.equal(await itemCount(win), beforeClip + 1, '应新增一件');
+      const st = await js(
+        win,
+        `rope.getState().then(s => (s.items.find(i => i.path && i.path.toLowerCase() === ${JSON.stringify(
+          clipFile.toLowerCase()
+        )}) || {}).type)`
+      );
+      assert.equal(st, 'file');
+    });
+  }
+
+  await check('AC-14 拖出计划不改动源文件（只读路径引用）', async () => {
+    const before = fs.statSync(iconPath);
+    const plan = T.planDrag({ kind: 'file', path: iconPath });
+    const after = fs.statSync(iconPath);
+    assert.equal(plan.ok, true);
+    assert.equal(plan.target, iconPath);
+    assert.equal(before.size, after.size);
+    assert.equal(before.mtimeMs, after.mtimeMs);
+  });
+
+  /* AC-21：抬起后向下拖出窗口 → 转为对外拖出 */
+  const dragLogBeforeDown = T.dragLog.length;
+  await js(
+    win,
+    `(async () => {
+      const el = document.querySelector('.item:not(.t-text)');
+      const r = el.getBoundingClientRect();
+      const mk = (x, y) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 3, pointerType: 'mouse', isPrimary: true });
+      el.dispatchEvent(new PointerEvent('pointerdown', mk(r.left + 10, r.top + 10)));
+      await new Promise((res) => setTimeout(res, 260));
+      document.dispatchEvent(new PointerEvent('pointermove', mk(r.left + 10, window.innerHeight + 60)));
+      document.dispatchEvent(new PointerEvent('pointerup', mk(r.left + 10, window.innerHeight + 60)));
+      return true;
+    })()`
+  );
+  await sleep(400);
+  await check('AC-21 抬起后向下拖出窗口底边 → 转为对外拖出', () => {
+    assert.ok(T.dragLog.length > dragLogBeforeDown, '应产生一次拖出载荷');
+    const last = T.dragLog[T.dragLog.length - 1];
+    assert.ok(last.target && fs.existsSync(last.target), '目标应存在：' + last.target);
+  });
+
+  /* --- 轨道横向滚动 --- */
+  await js(win, `(() => { for (let i = 0; i < 8; i++) rope.addText('轨道滚动测试-' + i); return true; })()`);
+  await waitFor('轨道溢出', async () => {
+    return js(win, '(() => { const t=document.querySelector("#track"); return t.scrollWidth - t.clientWidth > 0; })()');
+  });
+  await check('F3 挂件超出宽度时轨道可横向滚动', async () => {
+    const left = await js(
+      win,
+      `(() => { const t=document.querySelector('#track'); t.dispatchEvent(new WheelEvent('wheel',{deltaY:200,bubbles:true,cancelable:true})); return t.scrollLeft; })()`
+    );
+    assert.ok(left > 0, 'scrollLeft 应大于 0，实际 ' + left);
+  });
+
+  /* AC-39：鼠标不在挂件上、而在绳索条底部的背景空白处，滚轮同样能横向滚动 */
+  const bgScroll = await js(
+    win,
+    `(() => {
+      const t = document.querySelector('#track');
+      t.scrollLeft = 0;
+      const x = Math.round(t.getBoundingClientRect().left + 30);
+      const y = window.innerHeight - 4;                 // 卡片下方的背景空白（黄圈①处）
+      const el = document.elementFromPoint(x, y) || document.querySelector('#shell');
+      const where = (el.id || el.className || el.tagName) + '';
+      el.dispatchEvent(new WheelEvent('wheel', { deltaY: 200, bubbles: true, cancelable: true }));
+      return { after: t.scrollLeft, where };
+    })()`
+  );
+  await check('AC-39 在挂件下方的背景空白处滚轮 = 横向滚动', () => {
+    assert.ok(bgScroll.after > 0, `scrollLeft 应 > 0，实际 ${bgScroll.after}（落点 ${bgScroll.where}）`);
+  });
+
+  const bgScrollUp = await js(
+    win,
+    `(() => {
+      const t = document.querySelector('#track');
+      const el = document.querySelector('#shell');
+      const before = t.scrollLeft;
+      el.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true }));
+      return { before, after: t.scrollLeft };
+    })()`
+  );
+  await check('AC-39 反向滚轮往回滚', () => {
+    assert.ok(bgScrollUp.after < bgScrollUp.before, `${bgScrollUp.before} → ${bgScrollUp.after}`);
+  });
+
+  /* AC-39 后半：文件夹面板上的滚轮只翻列表，不横向滚动绳索 */
+  await js(win, `rope.addPaths(${JSON.stringify([path.join(ROOT, 'src')])})`);
+  await waitFor('重新挂上文件夹', async () => (await js(win, 'document.querySelectorAll(".item.t-folder").length')) >= 1);
+  await js(
+    win,
+    `(() => { const el=[...document.querySelectorAll('.item')].find(n=>n.classList.contains('t-folder')); el.dispatchEvent(new MouseEvent('mouseenter')); return true; })()`
+  );
+  await sleep(800);
+  await waitFor('文件夹面板展开', () =>
+    js(win, `(() => { const p=document.querySelector('#folder-panel'); return !p.hidden && !!p.querySelector('.fp-counter'); })()`)
+  );
+  const panelWheel = await js(
+    win,
+    `(() => {
+      const t = document.querySelector('#track');
+      const p = document.querySelector('#folder-panel');
+      t.scrollLeft = Math.min(50, t.scrollWidth - t.clientWidth);
+      const before = t.scrollLeft;
+      const c0 = (p.querySelector('.fp-counter') || {}).textContent || '';
+      p.dispatchEvent(new WheelEvent('wheel', { deltaY: 120, bubbles: true, cancelable: true }));
+      return {
+        before,
+        after: t.scrollLeft,
+        c0,
+        c1: (p.querySelector('.fp-counter') || {}).textContent || '',
+        rows: p.querySelectorAll('.fp-row').length,
+        hidden: p.hidden,
+      };
+    })()`
+  );
+  await check('AC-39 文件夹面板上滚轮只翻列表，不横向滚动绳索', () => {
+    const info = JSON.stringify(panelWheel);
+    assert.equal(panelWheel.hidden, false, info);
+    assert.ok(panelWheel.rows > 0, info);
+    assert.notEqual(panelWheel.c1, panelWheel.c0, '面板计数应变化：' + info);
+    assert.equal(panelWheel.after, panelWheel.before, '轨道不应被横向滚动：' + info);
+  });
+  await js(
+    win,
+    `(() => { const el=[...document.querySelectorAll('.item')].find(n=>n.classList.contains('t-folder')); el.dispatchEvent(new MouseEvent('mouseleave')); return true; })()`
+  );
+  await sleep(500);
+
+
+  /* --- 设置：独立普通窗口 --- */
+  await js(win, 'document.querySelector("#btn-settings").click()');
+  const sw = await waitSettingsWindow();
+  await check('AC-40 点「设置」打开的是独立窗口（绳索窗口之外多出一个窗口）', () => {
+    const all = BrowserWindow.getAllWindows();
+    assert.equal(all.length, 2, '窗口数应为 2，实际 ' + all.length);
+    assert.notEqual(sw.id, win.id, '不能是绳索窗口本身');
+    assert.equal(sw.getParentWindow(), null, '不应该是绳索窗口的子窗口');
+  });
+
+  await check('AC-41 设置窗口是普通窗口：系统标题栏可关闭、可缩放、不置顶', async () => {
+    const view = await js(
+      sw,
+      `({ titlebarPx: window.outerHeight - window.innerHeight, dir: document.querySelector('#cache-dir').textContent,
+          limit: document.querySelector('#limit-input').value, usage: document.querySelector('#cache-usage').textContent,
+          hotkey: document.querySelector('#hotkey-label').textContent, items: document.querySelector('#item-count').textContent })`
+    );
+    assert.equal(sw.isClosable(), true, '必须可关闭');
+    assert.equal(sw.isResizable(), true, '必须可缩放');
+    assert.equal(sw.isAlwaysOnTop(), false, '不应该置顶');
+    assert.ok(view.titlebarPx >= 20, '应有系统标题栏（含右上角关闭按钮），实际 ' + view.titlebarPx);
+    assert.ok(view.dir.length > 3, '缓存目录不应为空');
+    assert.equal(view.limit, '200');
+    assert.match(view.usage, /MB/);
+    assert.match(view.hotkey, /H/);
+    assert.match(view.items, /件/);
+  });
+
+  await check('AC-42 绳索收回后设置窗口仍然存在（不随顶部失焦消失）', async () => {
+    T.hideRope(true);
+    await sleep(700);
+    assert.ok(sw.isDestroyed() === false, '设置窗口不应被销毁');
+    assert.equal(sw.isVisible(), true, '绳索收回后设置窗口应仍可见');
+    assert.ok(BrowserWindow.getAllWindows().some((w) => w.id === sw.id), '设置窗口应还在窗口列表里');
+    T.showRope();
+    await sleep(500);
+  });
+
+  await js(sw, 'document.querySelector("#limit-input").value = "50"; document.querySelector("#btn-save-limit").click(); true');
+  await sleep(600);
+  await check('AC-35 在设置窗口改缓存上限后持久化', async () => {
+    assert.equal(readState().settings.cacheLimitMB, 50);
+    assert.equal(await js(sw, 'document.querySelector("#limit-input").value'), '50');
+  });
+
+  await check('AC-43 Esc 可关闭设置窗口，重开后是新窗口且只有一个', async () => {
+    await js(sw, `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
+    for (let i = 0; i < 40 && !sw.isDestroyed(); i++) await sleep(50);
+    assert.equal(sw.isDestroyed(), true, 'Esc 后设置窗口应被关闭');
+    assert.equal(T.getSettingsWindow(), null, '关闭后主进程不应留着窗口引用');
+
+    T.openSettingsWindow();
+    const again = await waitSettingsWindow();
+    assert.notEqual(again.id, sw.id, '重开应是新窗口');
+    assert.equal(BrowserWindow.getAllWindows().length, 2, '任何时候只允许一个设置窗口');
+    again.close();
+    for (let i = 0; i < 40 && T.getSettingsWindow(); i++) await sleep(50);
+  });
+
+  /* --- 清空 --- */
+  await js(win, 'rope.clearAll()');
+  await sleep(500);
+  await check('F3 清空按钮清空全部挂件并落盘', async () => {
+    assert.equal(await itemCount(win), 0);
+    assert.deepEqual(readState().items, []);
+    assert.equal(await js(win, 'document.querySelector("#empty-hint").hidden'), false);
+  });
+
+  await check('AC-36 无渲染进程崩溃记录', () => {
+    assert.equal(fs.existsSync(path.join(userData, 'crash.log')), false);
+  });
+}
+
+/* ---------------- 场景：恢复 / 不恢复 ---------------- */
+
+async function runRestore(win, expectRestore) {
+  const expected = JSON.parse(fs.readFileSync(path.join(userData, 'seed.json'), 'utf8')).items;
+
+  if (expectRestore) {
+    await waitFor('恢复后的挂件', async () => (await itemCount(win)) === expected.length);
+    await check('AC-10 选择恢复后挂件数量与顺序与关机前一致', async () => {
+      const ids = await js(win, 'rope.getState().then(s => s.items.map(i => i.id))');
+      assert.deepEqual(ids, expected.map((i) => i.id));
+      const domIds = await js(win, '[...document.querySelectorAll(".item")].map(n => n.dataset.id)');
+      assert.deepEqual(domIds, expected.map((i) => i.id));
+    });
+    await check('F8 恢复的内容类型正确（文字/图片/文件/文件夹）', async () => {
+      const kinds = await js(win, 'rope.getState().then(s => s.items.map(i => i.type))');
+      assert.deepEqual(kinds, expected.map((i) => i.type));
+    });
+  } else {
+    await waitFor('清空后的挂件', async () => (await itemCount(win)) === 0);
+    await sleep(400);
+    await check('AC-10 选择不恢复后挂件清空且记录落盘', () => {
+      assert.deepEqual(readState().items, []);
+    });
+  }
+}
+
+/* ---------------- 场景：快捷方式 ---------------- */
+
+async function runShortcut(win) {
+  const target = path.join(userData, 'target.txt');
+  fs.writeFileSync(target, 'hello');
+  const lnk = path.join(userData, 'target 快捷方式.lnk');
+
+  let created = false;
+  try {
+    created = shell.writeShortcutLink(lnk, 'create', { target });
+  } catch (e) {
+    created = false;
+  }
+
+  await check('样本准备：创建指向真实文件的 .lnk', () => {
+    assert.equal(created, true);
+    assert.ok(fs.existsSync(lnk));
+  });
+
+  T.addPaths([lnk]);
+  await sleep(400);
+
+  await check('AC-31 挂入 .lnk 后映射到本体（路径/名称/类型）', () => {
+    const it = T.snapshot().items.find((i) => i.path === target || i.path === lnk);
+    assert.ok(it, '应存在对应挂件');
+    assert.equal(it.path, target, '应存本体路径');
+    assert.equal(it.name, 'target.txt');
+    assert.equal(it.type, 'file');
+    assert.equal(it.shortcut, lnk, '应记录来源快捷方式');
+  });
+
+  await check('AC-31 拖出计划发送本体而非快捷方式', () => {
+    const plan = T.planDrag({ kind: 'file', path: lnk });
+    assert.equal(plan.ok, true);
+    assert.equal(plan.target, target);
+    assert.equal(plan.warning, '');
+  });
+
+  const dangling = path.join(userData, 'gone 快捷方式.lnk');
+  fs.writeFileSync(dangling, 'this is not a real shortcut');
+  T.addPaths([dangling]);
+  await sleep(400);
+
+  await check('AC-32 悬空快捷方式保留原样（不解析、不删除）', () => {
+    const it = T.snapshot().items.find((i) => i.path === dangling);
+    assert.ok(it, '挂件应保留');
+    assert.equal(it.path, dangling);
+  });
+
+  await check('AC-32 悬空快捷方式拖出时降级发送 .lnk 并提示', () => {
+    const plan = T.planDrag({ kind: 'file', path: dangling });
+    assert.equal(plan.ok, true);
+    assert.equal(plan.target, dangling);
+    assert.match(plan.warning, /不存在/);
+  });
+
+  await check('AC-36 无渲染进程崩溃记录', () => {
+    assert.equal(fs.existsSync(path.join(userData, 'crash.log')), false);
+  });
+}
+
+/* ---------------- 主流程 ---------------- */
+
+(async () => {
+  await app.whenReady();
+  const win = await waitFor('窗口创建', () => BrowserWindow.getAllWindows()[0]);
+  await waitFor('页面就绪', () =>
+    win.webContents.executeJavaScript('typeof rope !== "undefined"', true)
+  );
+
+  console.log(`\n[e2e] 场景：${scenario}`);
+
+  if (scenario === 'basic') await runBasic(win);
+  else if (scenario === 'restore') await runRestore(win, true);
+  else if (scenario === 'discard') await runRestore(win, false);
+  else if (scenario === 'shortcut') await runShortcut(win);
+  else throw new Error('未知场景：' + scenario);
+
+  console.log(`[e2e] ${scenario}: ${passes} 通过 / ${failures} 失败`);
+  // 用 exit 直接退出，避免对话框或托盘拖住进程
+  app.exit(failures ? 1 : 0);
+})().catch((err) => {
+  console.error('[e2e] 场景异常终止：', err && err.stack ? err.stack : err);
+  app.exit(3);
+});

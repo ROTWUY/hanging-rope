@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' file: data:;">
+  <title>悬挂绳</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="shell">
+    <div id="statusbar">
+      <div id="copy-pill" class="pill" title="开启后，你复制的内容会自动挂上绳（快捷键 Ctrl+Alt+H）">
+        <span class="dot"></span><span class="pill-text">复制即悬挂</span>
+      </div>
+      <div id="remove-hint" class="pill warn" hidden>按住 Esc 中：点击挂件即可取下 · 松开 Esc 退出</div>
+      <div id="controls">
+        <button id="btn-clear" class="icon-btn" title="清空全部挂件">清空</button>
+        <button id="btn-settings" class="icon-btn" title="设置">设置</button>
+      </div>
+    </div>
+
+    <div id="cord"></div>
+
+    <div id="track-wrap">
+      <div id="track"></div>
+      <div id="empty-hint">把 文件 / 文件夹 / 文字 / 图片 拖到这条绳上挂着 · 鼠标停在绳上按 Ctrl+V 也可粘贴悬挂</div>
+    </div>
+  </div>
+
+  <div id="folder-panel" hidden></div>
+
+  <div id="drop-veil" hidden><div class="veil-text">松手，把它挂上绳</div></div>
+  <div id="toast" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:;">
+  <title>悬挂绳 · 设置</title>
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+  <div class="app">
+    <header class="hd">
+      <h1>设置</h1>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>图片缓存</h2>
+
+        <div class="row stack">
+          <div class="k">
+            <span>缓存位置</span>
+            <small>悬挂的图片副本存在这里，原图不动</small>
+          </div>
+          <div class="v">
+            <span id="cache-dir" class="path" title=""></span>
+            <button id="btn-choose-dir" class="btn">更换…</button>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="k">
+            <span>缓存上限</span>
+            <small>超出后只提示，不会自动删掉你的原图</small>
+          </div>
+          <div class="v">
+            <div class="num">
+              <input id="limit-input" type="number" min="10" max="4096" step="10" aria-label="缓存上限（MB）">
+              <span>MB</span>
+            </div>
+            <button id="btn-save-limit" class="btn">保存</button>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="k">
+            <span>当前占用</span>
+            <small id="cache-usage">—</small>
+          </div>
+          <div class="v">
+            <div class="bar"><i id="usage-bar"></i></div>
+            <button id="btn-prune" class="btn">清理未引用</button>
+            <button id="btn-clear-cache" class="btn danger">清空缓存</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>悬挂绳</h2>
+
+        <div class="row">
+          <div class="k">
+            <span>复制即悬挂</span>
+            <small>复制文件 / 文字 / 图片后自动挂上绳</small>
+          </div>
+          <div class="v">
+            <kbd id="hotkey-label">Ctrl+Alt+H</kbd>
+            <span id="copy-state" class="tag">已关闭</span>
+            <button id="btn-toggle-copy" class="btn">切换</button>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="k">
+            <span>绳上挂件</span>
+            <small id="item-count">当前 0 件</small>
+          </div>
+          <div class="v">
+            <button id="btn-clear-all" class="btn danger">清空全部挂件</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="ft">
+      <button id="btn-quit" class="btn danger">退出程序</button>
+      <span class="spacer"></span>
+      <span id="status" class="status"></span>
+      <button id="btn-close" class="btn primary">关闭</button>
+    </footer>
+  </div>
+
+  <script src="settings.js"></script>
+</body>
+</html>

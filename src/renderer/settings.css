@@ -1,0 +1,307 @@
+/* 悬挂绳 —— 设置窗口样式
+   独立普通窗口（系统标题栏），内容区是深色卡片列表。 */
+
+:root {
+  --bg: #15171c;
+  --card: rgba(255, 255, 255, 0.04);
+  --card-line: rgba(255, 255, 255, 0.08);
+  --line: rgba(255, 255, 255, 0.09);
+  --text: #e8ecf4;
+  --text-dim: #a3adbf;
+  --text-faint: #6f7889;
+  --amber: #e2a34a;
+  --amber-soft: #f3c983;
+  --danger: #e2604a;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Microsoft YaHei UI", "PingFang SC", "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  -webkit-user-select: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+.app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 18px 20px 0;
+}
+
+/* ---------- 头部 ---------- */
+
+.hd {
+  flex: 0 0 auto;
+  padding-bottom: 10px;
+}
+
+.hd h1 {
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+
+/* ---------- 卡片 ---------- */
+
+main {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+
+main::-webkit-scrollbar {
+  width: 8px;
+}
+
+main::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--card-line);
+  border-radius: 12px;
+  padding: 2px 14px 8px;
+  margin-bottom: 10px;
+}
+
+.card h2 {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--amber);
+  letter-spacing: 1px;
+  margin: 10px 0 2px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 9px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.row:first-of-type {
+  border-top: none;
+}
+
+/* 路径这类长内容单独占一行，避免被按钮挤成省略号 */
+.row.stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.row.stack .k {
+  flex: none;
+}
+
+.row.stack .v {
+  justify-content: flex-start;
+}
+
+.k {
+  flex: 0 0 190px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.k > span {
+  font-size: 12.5px;
+  color: var(--text);
+}
+
+.k > small {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  line-height: 1.45;
+}
+
+.v {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.path {
+  flex: 1;
+  min-width: 0;
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+
+/* ---------- 控件 ---------- */
+
+.btn {
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn:hover {
+  color: var(--text);
+  border-color: rgba(226, 163, 74, 0.45);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn.danger {
+  color: #f0a396;
+  border-color: rgba(226, 96, 74, 0.32);
+  background: rgba(226, 96, 74, 0.1);
+}
+
+.btn.danger:hover {
+  background: rgba(226, 96, 74, 0.2);
+}
+
+.btn.primary {
+  color: #201607;
+  border-color: rgba(226, 163, 74, 0.6);
+  background: linear-gradient(180deg, var(--amber-soft), var(--amber));
+}
+
+.btn.primary:hover {
+  background: linear-gradient(180deg, #ffdca4, #eab05c);
+}
+
+.num {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-faint);
+  font-size: 11.5px;
+}
+
+#limit-input {
+  width: 84px;
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.32);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 0 8px;
+  outline: none;
+  text-align: right;
+}
+
+#limit-input:focus {
+  border-color: rgba(226, 163, 74, 0.65);
+}
+
+.bar {
+  flex: 1;
+  min-width: 40px;
+  height: 5px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 3px;
+  background: var(--amber);
+  transition: width 0.18s ease;
+}
+
+.bar > i.warn {
+  background: var(--danger);
+}
+
+kbd {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 11.5px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  padding: 3px 8px;
+}
+
+.tag {
+  font-size: 11px;
+  color: var(--text-faint);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 2px 8px;
+}
+
+.tag.on {
+  color: #9fe0b0;
+  border-color: rgba(90, 200, 120, 0.4);
+  background: rgba(90, 200, 120, 0.1);
+}
+
+/* ---------- 底部 ---------- */
+
+.ft {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0 12px;
+  border-top: 1px solid var(--line);
+  margin-top: 4px;
+}
+
+.ft .spacer {
+  flex: 1;
+}
+
+.status {
+  font-size: 11.5px;
+  color: #9fe0b0;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status.warn {
+  color: #ffb4a4;
+}

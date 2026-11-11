@@ -2,13 +2,14 @@
  * 悬挂绳 —— Electron 端到端场景
  *
  * 用法（由 test/run-tests.js 调用，不建议手工直接跑）：
- *   HR_SCENARIO=basic|restore|discard|shortcut
+ *   HR_SCENARIO=basic|restore|discard|shortcut|click
  *   HANGING_ROPE_TEST_USERDATA=<临时目录>
  *
  * 说明：
  *  · 真实系统拖放（startDrag）在自动化里会阻塞等待鼠标释放，因此用
  *    HANGING_ROPE_TEST_DRY_DRAG 让主进程只记录载荷（dragLog）而不真的拖；
  *    真实拖到微信/Word 属于手工验收项，见 DEVPLAN.md。
+ *  · HANGING_ROPE_TEST_DRY_OPEN 让"双击打开"只记 openLog，不真的弹出系统程序。
  *  · HANGING_ROPE_TEST_FREEZE_WATCHER 冻结光标轮询，避免测试机光标位置干扰
  *    窗口的唤出/收回，测试内用 __test.showRope()/hideRope() 显式驱动。
  */
@@ -1134,6 +1135,307 @@ async function runShortcut(win) {
   });
 }
 
+/* ---------------- 场景：单击复制 / 双击打开（v1.5） ----------------
+   独立场景，不与 basic 的手势用例抢剪贴板 / nativeDrag 保护窗口。
+   HANGING_ROPE_TEST_DRY_OPEN=1 让双击只记载荷，不真的弹出系统程序。 */
+
+async function runClick(win) {
+  T.showRope();
+  await sleep(500);
+  await installMouseShield(win);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-click-'));
+  const aFile = path.join(root, '文档.txt');
+  fs.writeFileSync(aFile, '单击复制用文件');
+  const aDir = path.join(root, '子目录');
+  fs.mkdirSync(aDir);
+  fs.writeFileSync(path.join(aDir, '内层.txt'), 'inner');
+  fs.mkdirSync(path.join(aDir, '更深的目录'));
+  const imgSrc = path.join(ROOT, 'assets', 'icon.png');
+
+  await js(win, `rope.addText('单击复制测试文本'); true`);
+  await js(win, `rope.addPaths(${JSON.stringify([aFile, aDir])}); true`);
+  T.addImageBuffer(fs.readFileSync(imgSrc), 'png', { mime: 'image/png', name: 'icon.png' });
+  await waitFor('四件挂件就位', async () => (await itemCount(win)) === 4);
+
+  const clipText = () => clipboard.readText();
+  const clipFiles = () =>
+    clipboard
+      .readBuffer('FileNameW')
+      .toString('utf16le')
+      .split('\0')
+      .filter(Boolean);
+  const clickEl = (selector, detail = 1) =>
+    js(
+      win,
+      `(() => { const el = document.querySelector(${JSON.stringify(
+        selector
+      )}); if (!el) return false; el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: ${detail} })); return true; })()`
+    );
+  const dblEl = (selector) =>
+    js(
+      win,
+      `(() => { const el = document.querySelector(${JSON.stringify(
+        selector
+      )}); if (!el) return false;
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2 }));
+        el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+        return true; })()`
+    );
+  const toastText = () => js(win, 'document.querySelector("#toast").textContent');
+
+  /* --- AC-51~53：单击 = 复制到系统剪贴板 --- */
+  clipboard.writeText('SENTINEL-51');
+  const textClicked = await clickEl('.item.t-text');
+  await sleep(350);
+  await check('AC-51 单击文字挂件 = 原文进剪贴板，并有提示', async () => {
+    assert.equal(textClicked, true);
+    assert.equal(clipText(), '单击复制测试文本');
+    assert.match(await toastText(), /已复制/);
+  });
+
+  clipboard.writeText('SENTINEL-52');
+  await clickEl('.item.t-file');
+  await sleep(350);
+  await check('AC-52 单击文件挂件 = 剪贴板里可粘贴的文件对象', async () => {
+    assert.deepEqual(clipFiles(), [aFile], 'FileNameW 应只有该文件的绝对路径');
+    assert.equal(clipText(), '', '文件对象不应退化成路径文本');
+    assert.match(await toastText(), /已复制/);
+  });
+
+  clipboard.writeText('SENTINEL-53');
+  const imgClicked = await js(
+    win,
+    `rope.getState().then((s) => {
+      const it = s.items.find((i) => i.type === 'image');
+      const el = it && document.querySelector('.item[data-id="' + it.id + '"]');
+      if (el) el.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+      return !!el;
+    })`
+  );
+  await sleep(350);
+  await check('AC-53 单击图片挂件 = 图片内容进剪贴板', () => {
+    assert.equal(imgClicked, true);
+    const img = clipboard.readImage();
+    assert.equal(img.isEmpty(), false, '应写入图片');
+    assert.ok(img.getSize().width > 0, '图片应有尺寸');
+  });
+
+  /* --- AC-54~55：双击 = 用系统默认程序打开 --- */
+  const openBefore = T.openLog.length;
+  await dblEl('.item.t-file');
+  await dblEl('.item.t-folder');
+  const imgOpen = await js(
+    win,
+    `rope.getState().then((s) => {
+      const it = s.items.find((i) => i.type === 'image');
+      const el = it && document.querySelector('.item[data-id="' + it.id + '"]');
+      if (el) el.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+      return it ? it.cachePath : '';
+    })`
+  );
+  await sleep(500);
+  await check('AC-54 双击文件 / 文件夹 / 图片挂件 = 打开对应本体', () => {
+    const added = T.openLog.slice(openBefore);
+    assert.equal(added.length, 3, '三次双击都该产生打开载荷：' + JSON.stringify(added));
+    assert.ok(added.some((e) => e.path === aFile), '应打开文件');
+    assert.ok(added.some((e) => e.path === aDir), '应打开文件夹');
+    assert.ok(added.some((e) => e.path === imgOpen), '应打开图片缓存副本：' + imgOpen);
+  });
+
+  clipboard.writeText('SENTINEL-55');
+  const openBeforeText = T.openLog.length;
+  await dblEl('.item.t-text');
+  await sleep(400);
+  await check('AC-55 双击文字挂件退化成复制并提示（不启动任何程序）', async () => {
+    assert.equal(T.openLog.length, openBeforeText, '文字不应产生打开载荷');
+    assert.equal(clipText(), '单击复制测试文本', '应退化为复制原文');
+    assert.match(await toastText(), /文字/);
+  });
+
+  /* --- AC-57：取件模式优先：按住 Esc 单击仍是取下，不复制 --- */
+  clipboard.writeText('SENTINEL-57');
+  const beforeRemove = await itemCount(win);
+  await js(
+    win,
+    `(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      const el = document.querySelector('.item.t-text');
+      if (el) el.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+      window.dispatchEvent(new KeyboardEvent('keyup', { key: 'Escape', bubbles: true }));
+      return true;
+    })()`
+  );
+  await sleep(450);
+  await check('AC-57 按住 Esc 单击挂件仍是取下，不触发复制', () => {
+    assert.equal(clipText(), 'SENTINEL-57', '剪贴板不应被改写');
+  });
+  await check('AC-57 取件确实生效（挂件数 -1）', async () => {
+    assert.equal(await itemCount(win), beforeRemove - 1);
+  });
+
+  /* --- AC-58：文件夹面板里的行用同一套单击/双击语义 --- */
+  const folderId = await waitItemId(win, aDir, '夹具文件夹挂件');
+  await openFolderPanel(win, folderId, 2);
+  const rowName = '内层.txt';
+  const rowPath = path.join(aDir, rowName);
+  clipboard.writeText('SENTINEL-58');
+  const rowClicked = await js(
+    win,
+    `(() => {
+      const row = [...document.querySelectorAll('#folder-panel .fp-row')].find(
+        (r) => r.querySelector('.fp-row-name').textContent === ${JSON.stringify(rowName)}
+      );
+      if (!row) return false;
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+      return true;
+    })()`
+  );
+  await sleep(350);
+  await check('AC-58 单击面板里的文件行 = 复制该文件对象，且行被选中', async () => {
+    assert.equal(rowClicked, true, '应能找到该文件行');
+    assert.deepEqual(clipFiles(), [rowPath]);
+    const sel = await js(
+      win,
+      `document.querySelector('#folder-panel .fp-row.sel .fp-row-name').textContent`
+    );
+    assert.equal(sel, rowName, '单击仍要选中该行');
+  });
+
+  const openBeforeRow = T.openLog.length;
+  await js(
+    win,
+    `(() => {
+      const row = [...document.querySelectorAll('#folder-panel .fp-row')].find(
+        (r) => r.querySelector('.fp-row-name').textContent === ${JSON.stringify(rowName)}
+      );
+      if (!row) return false;
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+      row.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 2 }));
+      row.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, detail: 2 }));
+      return true;
+    })()`
+  );
+  await sleep(400);
+  await check('AC-58 双击面板里的文件行 = 打开该文件（单击不重建 DOM）', () => {
+    const added = T.openLog.slice(openBeforeRow);
+    assert.equal(added.length, 1, '双击应只打开一次：' + JSON.stringify(added));
+    assert.equal(added[0].path, rowPath);
+  });
+
+  /* 📌 仍是固定/取消固定，不被新的单击语义带偏 */
+  clipboard.writeText('SENTINEL-PIN');
+  const pinBase = await js(win, 'rope.getState().then((s) => s.items.length)');
+  await js(
+    win,
+    `(async () => { const p = document.querySelector('#folder-panel .fp-pin'); p.click(); await new Promise((r) => setTimeout(r, 400)); return true; })()`
+  );
+  const pinOn = await js(win, 'rope.getState().then((s) => s.items.length)');
+  await js(
+    win,
+    `(async () => { const p = document.querySelector('#folder-panel .fp-pin'); p.click(); await new Promise((r) => setTimeout(r, 400)); return true; })()`
+  );
+  const pinOff = await js(win, 'rope.getState().then((s) => s.items.length)');
+  await check('AC-58 📌 仍可固定 / 取消固定，且不会误复制', () => {
+    assert.equal(pinOn, pinBase + 1, '点一下应固定');
+    assert.equal(pinOff, pinBase, '再点应取消固定');
+    assert.equal(clipText(), 'SENTINEL-PIN', '📌 点击不应写剪贴板');
+  });
+
+  /* --- AC-59：自己复制的内容不能被「复制即悬挂」又挂回来 --- */
+  await js(win, 'rope.setCopyMode(true); true');
+  await sleep(300);
+  const beforeWatch = await itemCount(win);
+  await clickEl('.item.t-file');
+  await sleep(1800); // 跨过至少两轮 700ms 剪贴板轮询
+  const afterWatch = await itemCount(win);
+  await js(win, 'rope.setCopyMode(false); true');
+  await check('AC-59 单击复制不触发「复制即悬挂」自我重复挂', () => {
+    assert.equal(afterWatch, beforeWatch, '挂件数不应增加');
+    assert.deepEqual(clipFiles(), [aFile], '剪贴板仍应是刚复制的文件');
+  });
+
+  /* --- AC-60：源已丢失时明确提示，不静默写脏剪贴板 --- */
+  const gone = path.join(root, '会被删.txt');
+  fs.writeFileSync(gone, 'x');
+  await js(win, `rope.addPaths(${JSON.stringify([gone])}); true`);
+  await waitFor('失效样本挂上', async () => {
+    const n = await js(
+      win,
+      `rope.getState().then((s) => s.items.filter((i) => i.path === ${JSON.stringify(
+        gone
+      )}).length)`
+    );
+    return n === 1;
+  });
+  fs.rmSync(gone);
+  clipboard.writeText('SENTINEL-60');
+  await js(
+    win,
+    `rope.getState().then((s) => {
+      const it = s.items.find((i) => i.path === ${JSON.stringify(gone)});
+      const el = it && document.querySelector('.item[data-id="' + it.id + '"]');
+      if (el) el.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+      return !!el;
+    })`
+  );
+  await sleep(400);
+  await check('AC-60 源已丢失时单击给出提示，剪贴板保持原样', async () => {
+    assert.equal(clipText(), 'SENTINEL-60');
+    assert.match(await toastText(), /已丢失/);
+  });
+
+  /* --- AC-56：手势优先，按住抬起 / 拖出后余下的 click 都不能当复制 --- */
+  clipboard.writeText('SENTINEL-56');
+  await js(
+    win,
+    `(async () => {
+      const el = document.querySelector('.item.t-file');
+      const r = el.getBoundingClientRect();
+      const mk = (x, y) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 11, pointerType: 'mouse', isPrimary: true });
+      el.dispatchEvent(new PointerEvent('pointerdown', mk(r.left + 10, r.top + 10)));
+      await new Promise((res) => setTimeout(res, 260));
+      document.dispatchEvent(new PointerEvent('pointermove', mk(r.left + 70, r.top + 10)));
+      document.dispatchEvent(new PointerEvent('pointerup', mk(r.left + 70, r.top + 10)));
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+      return true;
+    })()`
+  );
+  await sleep(350);
+  await check('AC-56 按住抬起排序后余下的 click 不触发复制', () => {
+    assert.equal(clipText(), 'SENTINEL-56');
+  });
+
+  clipboard.writeText('SENTINEL-56B');
+  const dragBefore = T.dragLog.length;
+  await js(
+    win,
+    `(async () => {
+      const el = document.querySelector('.item.t-file');
+      const r = el.getBoundingClientRect();
+      const mk = (x, y) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 12, pointerType: 'mouse', isPrimary: true });
+      el.dispatchEvent(new PointerEvent('pointerdown', mk(r.left + 10, r.top + 10)));
+      await new Promise((res) => setTimeout(res, 260));
+      document.dispatchEvent(new PointerEvent('pointermove', mk(r.left + 10, window.innerHeight + 60)));
+      document.dispatchEvent(new PointerEvent('pointerup', mk(r.left + 10, window.innerHeight + 60)));
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+      return true;
+    })()`
+  );
+  await sleep(350);
+  await check('AC-56 向下拖出窗口后余下的 click 也不触发复制', () => {
+    assert.ok(T.dragLog.length > dragBefore, '前置：确实发生了拖出');
+    assert.equal(clipText(), 'SENTINEL-56B');
+  });
+
+  await check('AC-36 本场景无渲染进程崩溃记录', () => {
+    assert.equal(fs.existsSync(path.join(userData, 'crash.log')), false);
+  });
+
+  fs.rmSync(root, { recursive: true, force: true });
+}
+
 /* ---------------- 主流程 ---------------- */
 
 (async () => {
@@ -1149,6 +1451,7 @@ async function runShortcut(win) {
   else if (scenario === 'restore') await runRestore(win, true);
   else if (scenario === 'discard') await runRestore(win, false);
   else if (scenario === 'shortcut') await runShortcut(win);
+  else if (scenario === 'click') await runClick(win);
   else throw new Error('未知场景：' + scenario);
 
   console.log(`[e2e] ${scenario}: ${passes} 通过 / ${failures} 失败`);

@@ -1,14 +1,14 @@
 # 悬挂绳 · 开发计划（可执行版）
 
-> 依据：`PRD.md` v1.4（自 v1.0 起逐版追加）
+> 依据：`PRD.md` v1.5（自 v1.0 起逐版追加）
 > 约定：✅ = 已实现并通过对应测试/验证；⬜ = 未完成（本计划执行完毕后已无 ⬜ 项）。🧪 表示该阶段必须有可运行测试。
-> 执行方式：按 P0 → P17 顺序推进，每阶段先跑测试，失败先修再进下一阶段。
+> 执行方式：按 P0 → P18 顺序推进，每阶段先跑测试，失败先修再进下一阶段。
 
 ---
 
 ## 0. 范围与完成定义
 
-**范围**：PRD 第 3 章 F1–F11 全部功能 + 第 5 章 AC-01 ~ AC-50。
+**范围**：PRD 第 3 章 F1–F11 全部功能 + 第 5 章 AC-01 ~ AC-60。
 
 **"完成"的定义**（三选一，缺一不可）：
 
@@ -48,6 +48,7 @@
 | P15 | 反馈修复：设置改为独立普通窗口 | ✅ 功能 / ✅ 测试 | AC-40~43，F10 |
 | P16 | 反馈增强：文件夹面板内 📌 固定子文件夹 | ✅ 功能 / ✅ 测试 | AC-44~46，F5 |
 | P17 | 反馈增强：📌 再点一次取消固定（开关语义） | ✅ 功能 / ✅ 测试 | AC-47~50，AC-45，F5 |
+| P18 | 反馈增强：单击复制 / 双击打开 | ✅ 功能 / ✅ 测试 | AC-51~60，AC-13/26，F3/F5 |
 
 ---
 
@@ -249,8 +250,31 @@
 - ✅ 单元 5 项（追加到 `test/unit/paths.test.js`）：等价变体命中、只算 folder/file、多份变体全部返回、前缀相同不误命中、空值 / 非法输入安全返回。
 - ✅ E2E `basic` 59 → 62 项：把原「再点不重复添加，只提示已经在绳上了」按新需求改为 AC-47「再点 = 取消固定」，新增 AC-48「取消后可重新固定且始终只有一件」、AC-49「从别处取下后 📌 自动熄灭」、AC-50「多份等价变体一次摘净」。**原"不重复添加"的要求没有删除**，改由 AC-48 的固定 → 取消 → 固定循环继续守着。
 - ✅ 反向验证：①去掉 `onState` 里的 `syncPinButtons()` → AC-49 失败（61 通过 / 1 失败）；②把 `unpinPath` 改成只删 `matches[0]` → AC-50 失败「两份应被一次摘净」（61 通过 / 1 失败）。两处均已还原，加固测试代码后又各重跑一次，结论不变。
-- ✅ **稳定性加固（本轮踩坑）**：连续跑全量套件时，basic 里靠"固定 `sleep(700)` + 取最后一个 folder 挂件"定位面板偶发失准 —— 状态推送慢会定位到错误的文件夹，宿主真实光标掠过触发 `mouseleave` 又会在 260ms 后按设计收起面板，曾出现 10 项连带假失败（第一次全绿、第二次 10 失败）。改为：`waitItemId()` 按路径等挂件出现、`openFolderPanel()` 按 `data-id` 精确锁定并条件等待面板展开、AC-50 用 `waitFor` 等两份变体挂件到位；再加 `installMouseShield()` **只拦授信（真实）鼠标边界事件**，合成事件 `isTrusted=false` 仍完整走产品逻辑；AC-49 等待期间模拟"鼠标停在面板上"（产品本来就不收起）。**断言标准一条未改，产品代码未因此改动**；加固后 `npm test` 连续三次 120 项全绿。
+- ✅ **稳定性加固（本轮踩坑）**：连续跑全量套件时，basic 里靠"固定 `sleep(700)` + 取最后一个 folder 挂件"定位面板偶发失准 —— 状态推送慢会定位到错误的文件夹，宿主真实光标掠过触发 `mouseleave` 又会在 260ms 后按设计收起面板，曾出现 10 项连带假失败（第一次全绿、第二次 10 失败）。改为：`waitItemId()` 按路径等挂件出现、`openFolderPanel()` 按 `data-id` 精确锁定并条件等待面板展开、AC-50 用 `waitFor` 等两份变体挂件到位；再加 `installMouseShield()` **只拦授信（真实）鼠标边界事件**，合成事件 `isTrusted=false` 仍完整走产品逻辑；AC-49 等待期间模拟"鼠标停在面板上"（产品本来就不收起）。**断言标准一条未改，产品代码未因此改动**；加固后 `npm test` 连续三次全绿（当时共 120 项）。
 - ✅ 交互细节：按钮 `title` 随状态在「固定到绳上」与「取消固定（已在绳上）」之间切换；金色 `on` 态语义从"只提示"改为"可再点取消"（`styles.css` 注释同步）。
+
+### P18 单击复制 / 双击打开（v1.5）
+
+**需求**：绳上挂件与文件夹面板里的行统一改成「单击（未按住拖动）= 复制到系统剪贴板，双击 = 用系统默认程序打开」；按住 0.15 秒抬起排序、向下拖出、按住 `Esc` 取件全部优先，绝不误触。
+
+**取舍与前置验证**：
+
+- **剪贴板格式实测**：先用独立 Electron 进程写 `clipboard.writeBuffer('FileNameW', utf16le(paths.join('\0') + '\0\0'))`，再用系统剪贴板 API 验证 `ContainsFileDropList() = True` 且路径正确 —— Chromium 会自动呈现标准 `CF_HDROP`，资源管理器 / 微信可直接粘贴；项目自身 `readClipboardFiles()` 也按同一套规则读回。实验前后备份并恢复了用户原剪贴板。结论：**不引入新依赖、不调用 PowerShell / Win32**，纯 Electron API 即可。
+- 「打开」用 `shell.openPath`；文字没有文件本体 → 退化成复制并提示；网页图片打开其缓存副本。
+- 自动化里双击只记 `openLog`、不真启动程序（`HANGING_ROPE_TEST_DRY_OPEN`），避免每次测试弹出记事本 / 看图器。
+
+- ✅ **P18-1** 新增 `src/main/item-action.js` 纯函数：`planCopy / planOpen / fileNameWBuffer`，挂件与面板行共用同一套类型分流，规则不漂移。
+- ✅ **P18-2** `main.js` 新增 `copyItemToClipboard / openItemTarget`、IPC `copy-item` / `open-item`、测试出口 `openLog`；写完剪贴板**必调 `snapshotClipboard()`** 刷新「复制即悬挂」基线。`preload.js` 暴露 `rope.copyItem / rope.openItem`。
+- ✅ **P18-3** 渲染层新增 `clickBlocked / markClickBlocked / doCopy / doOpen`；挂件与面板行都绑定单击复制、双击打开；`e.detail >= 2` 跳过双击的第二次复制；`actionToastSeq` 保证最后发起的那次操作的提示不被先返回的 IPC 覆盖。
+- ✅ **P18-4** 手势优先：`lift / commitReorder / dragOutFromItem / 文字 dragend` 全部 `markClickBlocked`；取件模式、拖拽态由 `clickBlocked()` 统一挡掉。
+- ✅ **P18-5** 面板行单击改为 `selectFolderRow()` 只改高亮与计数、**不重建 DOM**，保证 `dblclick` 能派发；📌 的 `dblclick` 也 `stopPropagation`，固定/取消固定不受影响。
+- ✅ **P18-6（顺带修真 bug）** `setRemoveMode(on, fromMain)`：主进程回传的 `remove-mode` 事件只同步 UI、不再回发 IPC，消除「按下 → 点击 → 松开」快速连发时的 `true→false→true` 回环（会让取件模式关不掉，后续单击全变成"取下"）。basic 的 AC-23~26 回归验证通过。
+
+**测试**
+
+- ✅ 单元 10 项（`test/unit/item-action.test.js`）：复制分流、打开分流、文字退化、`FileNameW` 字节（单/多路径/空值）。
+- ✅ 新增独立 E2E 场景 `click` 15 项：AC-51~AC-60 全覆盖（含取件模式、📌 不受影响、自我悬挂、源丢失、两种手势不误触）。独立场景，不与 basic 抢剪贴板 / `nativeDrag` 保护窗口。
+- ✅ 反向验证见 6.2 表；basic 62 项回归全绿。
 
 ---
 
@@ -269,7 +293,7 @@
 | AC-09 超长文字拒绝 | 自动 | E2E |
 | AC-10 恢复一致 | 自动（restore/discard 场景） | E2E |
 | AC-11/12 文件·文件夹拖入外部 | 手工（真实拖到微信/资源管理器） | 手工 |
-| AC-13 文字拖出/双击复制 | 自动（DataTransfer 内容）+ 手工（落到记事本） | E2E / 手工 |
+| AC-13 文字拖出/单击复制 | 自动（DataTransfer 内容）+ 手工（落到记事本） | E2E / 手工 |
 | AC-14 原件不受影响 | 自动（拖出计划不改动源文件、mtime/大小不变） | E2E |
 | AC-15/16 面板与滚轮 | 自动 | E2E |
 | AC-17 行拖出 | 自动（dry-drag 载荷）+ 手工（落到微信） | E2E / 手工 |
@@ -300,6 +324,16 @@
 | AC-48 取消后可重新固定且不重复 | 自动（再点后该路径恰好 1 件、总数 = 基准 +1、`on` 亮起） | E2E |
 | AC-49 别处取下后 📌 自动熄灭 | 自动（`rope.removeItem` 后不重开面板，断言 `on` 为假且面板仍开） | E2E |
 | AC-50 等价变体一次全摘 | 自动（同时挂两份大小写变体 → 点一次后全部消失、无新增）+ `pinnedItems` 单测 | 单测 + E2E |
+| AC-51 单击文字挂件复制 | 自动（`clipboard.readText()` 等于原文 + toast） | E2E |
+| AC-52 单击文件挂件复制成文件对象 | 自动（`clipboard.readBuffer('FileNameW')` 解析出该绝对路径，且 `readText()` 为空） | E2E |
+| AC-53 单击图片挂件复制图片 | 自动（`clipboard.readImage()` 非空且有尺寸） | E2E |
+| AC-54 双击打开本体 | 自动（dry-run `openLog` 三条载荷 = 文件 / 文件夹 / 图片缓存副本） | E2E |
+| AC-55 文字双击退化 | 自动（`openLog` 不增长、剪贴板仍是原文、toast 含"文字"） | 单测 + E2E |
+| AC-56 手势后不误复制 | 自动（排序与拖出两种手势后补发 click，剪贴板哨兵不变） | E2E |
+| AC-57 取件模式优先且能复位 | 自动（Esc 按下→点击→松开后挂件 -1、剪贴板哨兵不变；后续单击仍按复制语义工作） | E2E |
+| AC-58 面板行同语义 + 📌 不受影响 | 自动（行单击复制 + 选中、双击打开、📌 固定/取消固定、剪贴板哨兵不变） | E2E |
+| AC-59 复制不自我悬挂 | 自动（开启"复制即悬挂"后单击复制，跨两轮 700ms 轮询挂件数不变） | E2E |
+| AC-60 源丢失明确提示 | 自动（删掉源文件后单击，剪贴板哨兵不变 + toast 含"已丢失"） | E2E |
 
 **手工清单（无法自动化，交付时逐条自测）**：
 
@@ -309,6 +343,7 @@
 4. 文件夹面板某行拖入微信（AC-17）。
 5. 设置窗口里点"更换…"选择目录并确认迁移（AC-34）；顺便看标题栏右上角的 × 是否能关窗（AC-41）。
 6. 网页图片拖入（需联网抓图，重点看 SVG/WebP 和"抓回来是 403 页面"两种情况）（AC-37/38）。
+7. 真实双击挂件 / 面板行，确认系统默认程序确实打开对应对象（自动化为 dry-run，只校验载荷不启动程序）（AC-54）；顺手把单击复制出的文件粘贴到微信 / 资源管理器，确认落下的是文件本体而不是路径文本（AC-52）。
 7. 绳索条内挂件下方空白处滚轮横向滚动（AC-39）。
 
 ---
@@ -338,18 +373,19 @@ npm run test:e2e  # 只跑 Electron 场景
 
 ---
 
-## 6. 执行结果（2026-11-11，v1.4 更新）
+## 6. 执行结果（2026-11-11，v1.5 更新）
 
 ### 6.1 测试套件与结果
 
 | 套件 | 命令 | 用例数 | 结果 |
 | --- | --- | --- | --- |
-| 单元测试（store / geometry / drag-plan / image-format / paths） | `npm run test:unit` | 49 | 全部通过 |
+| 单元测试（store / geometry / drag-plan / image-format / paths / item-action） | `npm run test:unit` | 59 | 全部通过 |
 | E2E `basic`（形态·悬挂·网页图片·文件夹·📌固定/取消·排序·取件·复制·滚动·设置窗口） | `npm run test:e2e` | 62 | 全部通过 |
 | E2E `shortcut`（.lnk 映射与悬空降级） | `npm run test:e2e` | 6 | 全部通过 |
 | E2E `restore`（恢复上次悬挂） | `npm run test:e2e` | 2 | 全部通过 |
 | E2E `discard`（选择不恢复） | `npm run test:e2e` | 1 | 全部通过 |
-| **合计** | `npm test` | **120** | **连续三次全绿** |
+| E2E `click`（单击复制 / 双击打开，AC-51~60） | `npm run test:e2e` | 15 | 全部通过 |
+| **合计** | `npm test` | **145** | **连续三次全绿** |
 
 ### 6.2 反向验证（证明测试不是空跑）
 
@@ -364,6 +400,9 @@ npm run test:e2e  # 只跑 Electron 场景
 | 去掉 📌 的 `pointerdown stopPropagation`（P16） | AC-46 失败 | ✗ AC-46「不应产生拖出载荷」失败（58 通过 / 1 失败） |
 | 去掉 `onState` 里的 `syncPinButtons()`（P17） | AC-49 失败 | ✗ AC-49「📌 自动熄灭」失败：📌 不应还留在已固定态（61 通过 / 1 失败） |
 | `unpinPath` 只删 `matches[0]`（P17） | AC-50 失败 | ✗ AC-50「多份变体一次摘净」失败：两份应被一次摘净（61 通过 / 1 失败） |
+| 去掉挂件 `click` 里的 `clickBlocked()`（P18） | AC-56 / AC-57 失败 | ✗ AC-56 两条「手势后不复制」+ AC-57「取件模式不复制」失败（12 通过 / 3 失败） |
+| 去掉 `copyItemToClipboard` 里的 `snapshotClipboard()`（P18） | AC-59 失败 | ✗ AC-59「不自我悬挂」失败：挂件数不应增加（14 通过 / 1 失败） |
+| 恢复 `onRemoveModeEvent` 的 IPC 回环（P18） | AC-58 / AC-60 失败 | ✗ AC-58「双击面板行打开」、AC-60「源丢失提示」失败（13 通过 / 2 失败） |
 
 以上改动均已还原并重跑，全绿。
 
@@ -387,6 +426,10 @@ npm run test:e2e  # 只跑 Electron 场景
 - `src/renderer/app.js` + `styles.css`（P17）：`applyPinVisual / syncPinButton / syncPinButtons`、📌 点击按固定态切换 pin/unpin、`onState` 状态校准、`data-path`、金色态注释语义更新。
 - `test/unit/paths.test.js`（P17）：新增 `pinnedItems` 5 项单测（等价变体、类型过滤、多份全返回、前缀不误命中、非法输入）。
 - `test/e2e/scenarios.js`（P17）：新增 AC-47~50 四条用例；新增 `waitItemId / openFolderPanel / installMouseShield` 三个辅助，文件夹面板定位由"最后一个 folder 挂件 + 固定 sleep"改为按 id 精确定位 + 条件等待；收尾清理路径比较改为大小写不敏感。
+- 新增 `src/main/item-action.js`（P18）：`planCopy / planOpen / fileNameWBuffer` 纯函数，挂件与面板行共用。
+- `src/main/main.js` + `src/preload/preload.js`（P18）：`copyItemToClipboard / openItemTarget`、IPC `copy-item` / `open-item`、`rope.copyItem / rope.openItem`、`openLog` 与 `HANGING_ROPE_TEST_DRY_OPEN`；写剪贴板后刷新监听基线。
+- `src/renderer/app.js`（P18）：单击复制 / 双击打开（挂件 + 面板行）、`clickBlocked / markClickBlocked / actionToastSeq`、`selectFolderRow()` 轻量选中、📌 `dblclick` 隔离、`setRemoveMode` 去回环。
+- 新增 `test/unit/item-action.test.js`（P18，10 项）；`test/e2e/scenarios.js` 新增独立 `click` 场景（15 项）；`test/run-tests.js` 注册该场景并注入 `HANGING_ROPE_TEST_DRY_OPEN`。
 - 新增 `test/unit/*.test.js`（4 个文件 39 项）、`test/e2e/scenarios.js`（4 个场景）、`test/run-tests.js`（运行器，E2E 注入隔离 `LOCALAPPDATA`）。
 - `package.json`：新增 `test` / `test:unit` / `test:e2e`。
 

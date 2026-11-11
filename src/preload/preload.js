@@ -41,6 +41,10 @@ contextBridge.exposeInMainWorld('rope', {
   startDrag: (payload) => ipcRenderer.send('start-drag', payload),
   dragEnded: () => ipcRenderer.send('drag-ended'),
 
+  /* 单击复制 / 双击打开（挂件与文件夹面板行共用，v1.5） */
+  copyItem: (target) => ipcRenderer.invoke('copy-item', target),
+  openItem: (target) => ipcRenderer.invoke('open-item', target),
+
   /* 文件夹浏览 */
   listFolder: (dir) => ipcRenderer.invoke('list-folder', dir),
   pinPath: (p) => ipcRenderer.invoke('pin-path', p),

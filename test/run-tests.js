@@ -72,6 +72,7 @@ function e2e(tag, extraEnv, userData) {
     HANGING_ROPE_TEST_USERDATA: dir,
     LOCALAPPDATA: localAppData,
     HANGING_ROPE_TEST_DRY_DRAG: '1',
+    HANGING_ROPE_TEST_DRY_OPEN: '1',
     HANGING_ROPE_TEST_FREEZE_WATCHER: '1',
     ...extraEnv,
   });
@@ -94,6 +95,7 @@ if (only === 'all' || only === 'unit') {
 if (only === 'all' || only === 'e2e') {
   e2e('basic', {});
   e2e('shortcut', {});
+  e2e('click', {});
 
   // 恢复场景：预置 4 件内容（文字 / 图片 / 文件 / 文件夹）
   const seedItems = [

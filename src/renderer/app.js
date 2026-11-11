@@ -27,6 +27,7 @@ const ui = {
   textDrag: null, // { el, reordered } 文字挂件的 HTML5 拖拽会话
   nativeDrag: false, // 自己发起的原生拖拽（拖出）进行中
   nativeDragTimer: null,
+  suppressClickUntil: 0, // 手势刚结束的短暂窗口，不把余下的 click 当成"单击复制"
   lastDragPath: '',
   lastDragAt: 0,
   folder: null, // { id, entries, index, error }
@@ -123,6 +124,84 @@ function toast(text, warn) {
   els.toast.hidden = false;
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (els.toast.hidden = true), 2600);
+}
+
+/* ---------------- 单击复制 / 双击打开（v1.5） ----------------
+   绳上挂件与文件夹浏览面板里的行共用这一套：单击 = 复制到系统剪贴板，
+   双击 = 用系统默认程序打开对象本体。按住拖动 / 排序 / 拖出 / 取件模式
+   全部优先，绝不把一次手势误判成"单击复制"。 */
+
+function markClickBlocked(ms) {
+  ui.suppressClickUntil = Math.max(ui.suppressClickUntil, Date.now() + ms);
+}
+
+function clickBlocked() {
+  return (
+    ui.removeMode ||
+    ui.nativeDrag ||
+    ui.press ||
+    ui.reorder ||
+    ui.textDrag ||
+    Date.now() < ui.suppressClickUntil
+  );
+}
+
+function targetOfItem(item) {
+  return {
+    type: item.type,
+    path: item.path || '',
+    cachePath: item.cachePath || '',
+    text: item.text || '',
+    invalid: !!item.invalid,
+  };
+}
+
+function targetOfRow(entry) {
+  return {
+    type: entry.isDir ? 'folder' : 'file',
+    path: entry.path || '',
+    cachePath: '',
+    text: '',
+    invalid: false,
+  };
+}
+
+/* 双击 = 两次 click + 一次 dblclick，复制与打开的 IPC 可能乱序返回。
+   用序号保证"最后发起的那次操作"说了算，别让先回来的复制提示盖掉打开提示。 */
+let actionToastSeq = 0;
+
+async function doCopy(target, label) {
+  const seq = ++actionToastSeq;
+  try {
+    const res = await rope.copyItem(target);
+    if (seq !== actionToastSeq) return res;
+    if (res && res.ok) toast('已复制：' + label + '，可直接粘贴');
+    else toast((res && res.message) || '复制失败', true);
+    return res;
+  } catch (err) {
+    if (seq !== actionToastSeq) return null;
+    toast('复制失败：' + err.message, true);
+    return null;
+  }
+}
+
+async function doOpen(target, label) {
+  const seq = ++actionToastSeq;
+  try {
+    const res = await rope.openItem(target);
+    if (seq !== actionToastSeq) return res;
+    if (res && res.ok) toast('已打开：' + label);
+    else if (res && res.fallback === 'copy') {
+      toast(res.message || '文字没有可打开的文件', !res.copied);
+    } else {
+      toast((res && res.message) || '打开失败', true);
+    }
+    return res;
+  } catch (err) {
+    if (seq !== actionToastSeq) return null;
+    toast('打开失败：' + err.message, true);
+    return null;
+  }
 }
 
 /* ---------------- 渲染 ---------------- */
@@ -271,6 +350,7 @@ function wireItem(el, item) {
         commitReorder(); // 在绳内移动过 → 提交排序；拖到外部则本身就是拖出
       }
       ui.textDrag = null;
+      markClickBlocked(350); // 拖完可能补一个 click，别当成"单击复制"
       rope.busy(false);
     });
   } else {
@@ -325,17 +405,16 @@ function wireItem(el, item) {
     }, { passive: false });
   }
 
-  /* --- 双击兜底：文字/图片复制到剪贴板；文件在资源管理器中显示 --- */
+  /* --- v1.5：单击 = 复制到剪贴板，双击 = 用系统默认程序打开 ---
+     双击的第二次 click（detail>=2）跳过，避免连续复制两遍；
+     按住拖动 / 排序 / 拖出 / 取件模式由 clickBlocked() 统一挡掉。 */
+  el.addEventListener('click', (e) => {
+    if (e.detail >= 2 || clickBlocked()) return;
+    doCopy(targetOfItem(item), itemLabel(item) || item.type);
+  });
   el.addEventListener('dblclick', () => {
-    if (item.type === 'text') {
-      rope.copyToClipboard({ text: item.text });
-      toast('已复制，可直接粘贴');
-    } else if (item.type === 'image' && !item.invalid) {
-      rope.copyToClipboard({ imageCachePath: item.cachePath });
-      toast('已复制图片，可直接粘贴');
-    } else if (!item.invalid) {
-      rope.revealItem(item.path);
-    }
+    if (clickBlocked()) return;
+    doOpen(targetOfItem(item), itemLabel(item) || item.type);
   });
 
   /* --- 图片挂件本身即预览图，悬停用系统提示补充信息 --- */
@@ -351,6 +430,7 @@ function dragOutFromItem(item) {
     toast('源已丢失，无法拖出');
     return;
   }
+  markClickBlocked(2600); // 原生拖放结束后余下的 click 不能算"单击复制"
   ui.nativeDrag = true;
   ui.lastDragPath = item.path || '';
   ui.lastDragAt = Date.now();
@@ -390,6 +470,7 @@ function reorderAtPoint(x, y, dragged) {
 
 function lift(p) {
   p.lifted = true;
+  markClickBlocked(600); // 已"抬起"就属于排序手势，松手后的 click 不复制
   ui.reorder = p;
   p.el.classList.add('lifting');
   document.body.classList.add('reordering');
@@ -398,6 +479,7 @@ function lift(p) {
 
 function commitReorder() {
   document.body.classList.remove('reordering');
+  markClickBlocked(600);
   if (ui.reorder) {
     ui.reorder.el.classList.remove('lifting');
     ui.reorder = null;
@@ -483,6 +565,21 @@ function cycleFolder(dir) {
   renderFolderPanel();
 }
 
+/* 选中某行：只改高亮与计数，不重建 DOM。
+   重建会让两次 click 落在不同元素上，dblclick 就不会派发（v1.5 单击/双击同存的前提）。 */
+function selectFolderRow(i) {
+  const f = ui.folder;
+  if (!f || f.index === i) return;
+  f.index = i;
+  for (const r of els.folderPanel.querySelectorAll('.fp-row')) {
+    r.classList.toggle('sel', Number(r.dataset.index) === i);
+  }
+  const counter = els.folderPanel.querySelector('.fp-counter');
+  if (counter) {
+    counter.textContent = f.entries.length ? `${i + 1} / ${f.entries.length}` : '0 项';
+  }
+}
+
 function scheduleFolderClose() {
   clearTimeout(ui.folderCloseTimer);
   ui.folderCloseTimer = setTimeout(closeFolder, 260);
@@ -554,6 +651,7 @@ function renderFolderPanel() {
     const entry = f.entries[i];
     const row = document.createElement('div');
     row.className = 'fp-row' + (i === f.index ? ' sel' : '');
+    row.dataset.index = String(i);
 
     const label = document.createElement('div');
     label.className = 'fp-row-name';
@@ -623,6 +721,9 @@ function renderFolderPanel() {
           delete pin.dataset.busy;
         }
       });
+      pin.addEventListener('dblclick', (e) => {
+        e.stopPropagation(); // 双击 📌 只做固定/取消固定，不冒泡成"双击打开"
+      });
       row.appendChild(pin);
     } else {
       const slot = document.createElement('span');
@@ -630,19 +731,20 @@ function renderFolderPanel() {
       row.appendChild(slot);
     }
 
-    // 点击 = 选中该行；按住拖动 = 拖出（与挂件同一手势，见全局 pointermove）
-    row.addEventListener('click', () => {
-      if (f.index !== i) {
-        f.index = i;
-        renderFolderPanel();
-      }
+    // v1.5：单击 = 选中 + 复制到剪贴板，双击 = 打开；按住拖动仍是拖出
+    row.addEventListener('click', (e) => {
+      selectFolderRow(i);
+      if (e.detail >= 2 || clickBlocked()) return;
+      doCopy(targetOfRow(entry), entry.name);
+    });
+    row.addEventListener('dblclick', () => {
+      if (clickBlocked()) return;
+      doOpen(targetOfRow(entry), entry.name);
     });
     row.addEventListener('pointerdown', (e) => {
       if (e.button !== 0 || ui.nativeDrag || ui.press || ui.reorder) return;
-      // 让行内的 pointerdown 优先选中该行
-      if (f.index !== i) {
-        f.index = i;
-      }
+      // 让行内的 pointerdown 优先选中该行（不重建 DOM，避免打断拖出手势）
+      selectFolderRow(i);
       const p = {
         item: { type: entry.isDir ? 'folder' : 'file', path: entry.path, name: entry.name },
         el: row,
@@ -788,12 +890,14 @@ document.addEventListener('drop', async (e) => {
 
 /* ---------------- 取件模式（按住 Esc 点击取下） ---------------- */
 
-function setRemoveMode(on) {
+function setRemoveMode(on, fromMain = false) {
   if (ui.removeMode === on) return;
   ui.removeMode = on;
   document.body.classList.toggle('remove-mode', on);
   els.removeHint.hidden = !on;
-  rope.setRemoveMode(on); // 同步主进程状态
+  // 主进程回传的事件只同步 UI，不再回发 IPC：否则"按下→点击→松开"快速连发时
+  // 会形成 true→false→true 的回环，取件模式关不掉，后续单击会误触取下。
+  if (!fromMain) rope.setRemoveMode(on);
 }
 
 /* Esc 手势 = 按住进入、松开退出（点击挂件取下）。
@@ -826,7 +930,7 @@ document.addEventListener('click', (e) => {
 
 /* 主进程的全局 Esc（窗口未聚焦时兜底）也走这里 */
 function onRemoveModeEvent(on) {
-  setRemoveMode(on);
+  setRemoveMode(!!on, true);
 }
 
 /* ---------------- 设置 ----------------

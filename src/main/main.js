@@ -24,6 +24,7 @@ const geo = require('./geometry');
 const dragPlan = require('./drag-plan');
 const imageFormat = require('./image-format');
 const paths = require('./paths');
+const itemAction = require('./item-action');
 
 /* ---------------- 常量 ---------------- */
 const BASE_HEIGHT = 210; // 常规高度（文件夹浏览面板展开时由渲染层调到 370）
@@ -69,6 +70,10 @@ let clipTimer = null;
 let lastClipText = '';
 let lastClipImageHash = '';
 let lastClipFileSig = '';
+
+/* 双击打开的动作日志；自动化里只记载荷，不真的启动系统程序 */
+const openLog = [];
+const dryOpen = () => process.env.HANGING_ROPE_TEST_DRY_OPEN === '1';
 
 /* 测试支持：允许用独立 userData 启动，不与正在运行的正式实例抢单实例锁 */
 if (process.env.HANGING_ROPE_TEST_USERDATA) {
@@ -328,6 +333,76 @@ function snapshotClipboard() {
   lastClipImageHash = clipImageHash(clipboard.readImage());
   const files = readClipboardFiles();
   lastClipFileSig = files.length ? 'files:' + files.join('|').toLowerCase() : '';
+}
+
+/**
+ * 单击复制：把目标写进系统剪贴板（v1.5）。
+ * 写完必须刷新"复制即悬挂"的监听基线，否则自己复制的内容会在下一次轮询里
+ * 又被自动挂回绳上 —— 正好踩到 AC-29 要防的重复悬挂。
+ */
+function copyItemToClipboard(target) {
+  const plan = itemAction.planCopy(target);
+  if (!plan.ok) return plan;
+  try {
+    if (plan.kind === 'text') {
+      clipboard.writeText(plan.payload.text);
+    } else if (plan.kind === 'image') {
+      const p = plan.payload.imageCachePath;
+      if (!fs.existsSync(p)) {
+        return { ok: false, reason: 'missing', message: '图片副本已丢失，无法复制' };
+      }
+      clipboard.writeImage(nativeImage.createFromPath(p));
+    } else {
+      const exists = plan.payload.paths.filter((p) => fs.existsSync(p));
+      if (!exists.length) {
+        return { ok: false, reason: 'missing', message: '源文件已丢失，无法复制' };
+      }
+      const buf = itemAction.fileNameWBuffer(exists);
+      if (!buf.length) return { ok: false, reason: 'bad-path', message: '源文件路径无效' };
+      // 实测：写 FileNameW 后系统会同时呈现标准 CF_HDROP，可直接粘贴到资源管理器
+      clipboard.writeBuffer('FileNameW', buf);
+    }
+    snapshotClipboard();
+    return { ok: true, kind: plan.kind };
+  } catch (err) {
+    return { ok: false, reason: 'error', message: (err && err.message) || '复制失败' };
+  }
+}
+
+/**
+ * 双击打开：用系统默认程序打开对象本体（v1.5）。
+ * 文字没有文件本体 → 退化为复制并提示；源文件丢失 → 明确提示，不静默失败。
+ */
+async function openItemTarget(target) {
+  const plan = itemAction.planOpen(target);
+  if (!plan.ok) {
+    if (plan.fallback === 'copy') {
+      const r = copyItemToClipboard(target);
+      return {
+        ok: false,
+        fallback: 'copy',
+        copied: !!r.ok,
+        message: r.ok ? plan.message : r.message,
+      };
+    }
+    return plan;
+  }
+  const p = plan.payload.path;
+  if (!fs.existsSync(p)) {
+    return { ok: false, reason: 'missing', message: '源文件已丢失，无法打开' };
+  }
+  // 自动化里只记载荷，否则每次双击都会弹出记事本 / 看图器 / 资源管理器
+  if (dryOpen()) {
+    openLog.push({ path: p, at: Date.now() });
+    return { ok: true, kind: 'open', dry: true, path: p };
+  }
+  try {
+    const err = await shell.openPath(p);
+    if (err) return { ok: false, reason: 'open-failed', message: err };
+    return { ok: true, kind: 'open', path: p };
+  } catch (err) {
+    return { ok: false, reason: 'error', message: (err && err.message) || '打开失败' };
+  }
 }
 
 function setCopyMode(on) {
@@ -1040,6 +1115,10 @@ function registerIpc() {
     }
   });
 
+  /* v1.5：单击复制 / 双击打开，绳上挂件与文件夹面板行共用同一套动作 */
+  ipcMain.handle('copy-item', (_e, target) => copyItemToClipboard(target));
+  ipcMain.handle('open-item', (_e, target) => openItemTarget(target));
+
   /* 设置 */
   ipcMain.on('open-settings', () => openSettingsWindow());
   ipcMain.handle('settings:info', () => settingsSnapshot());
@@ -1223,6 +1302,9 @@ if (process.env.HANGING_ROPE_TEST_USERDATA) {
     addImageFromUrl,
     planDrag,
     dragLog,
+    openLog,
+    copyItemToClipboard,
+    openItemTarget,
     openSettingsWindow,
     getWindow: () => win,
     getSettingsWindow: () => settingsWin,

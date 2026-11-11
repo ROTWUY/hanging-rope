@@ -590,7 +590,7 @@ body.remove-mode .item::after {
   filter: none;
 }
 
-/* 已经固定在绳上：金色底，点击只提示、不重复添加 */
+/* 已经固定在绳上：金色底；再点一次 = 取消固定 */
 .fp-pin.on {
   background: rgba(226, 163, 74, 0.22);
   border-color: rgba(226, 163, 74, 0.55);

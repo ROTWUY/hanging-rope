@@ -6,6 +6,8 @@
  * 注意：只做字符串层面的等价，不做软链接/短路径（8.3）解析。
  */
 
+const path = require('path');
+
 /**
  * @param {string} p 绝对路径
  * @returns {string} 归一化后的比较键；非法输入返回空串
@@ -27,4 +29,24 @@ function samePath(a, b) {
   return !!ka && ka === pathKey(b);
 }
 
-module.exports = { pathKey, samePath };
+/**
+ * 找出 items 里所有指向同一目标的文件/文件夹挂件。
+ * 供「📌 固定」的去重与「再点一次取消固定」的摘除共用同一套判定，
+ * 避免两处规则漂移；同一目标若因大小写/斜杠/末尾分隔符变体被重复挂了多份，
+ * 会一起返回（取消固定时一次全摘，不会点了还剩一张卡片）。
+ * @param {Array<{type?:string,path?:string}>} items
+ * @param {string} p 目标路径
+ * @returns {Array} 匹配到的挂件（可能 0 / 1 / 多个）
+ */
+function pinnedItems(items, p) {
+  if (!Array.isArray(items) || !p || typeof p !== 'string' || !p.trim()) return [];
+  const key = pathKey(path.resolve(p.trim()));
+  if (!key) return [];
+  return items.filter((it) => {
+    if (!it || (it.type !== 'folder' && it.type !== 'file')) return false;
+    if (typeof it.path !== 'string' || !it.path.trim()) return false;
+    return pathKey(path.resolve(it.path.trim())) === key;
+  });
+}
+
+module.exports = { pathKey, samePath, pinnedItems };

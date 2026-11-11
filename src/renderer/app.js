@@ -77,6 +77,27 @@ function isPinnedPath(p) {
   );
 }
 
+/* 📌 的"已固定"态以绳上实际状态为准：除了点按钮时更新，
+   每次状态推送也同步一遍 —— 从别处（Esc 取件、拖入、清空）拿下挂件后，
+   已展开的面板里的金色态必须跟着熄灭，否则按钮会骗人（AC-49）。 */
+function applyPinVisual(pin, on) {
+  pin.classList.toggle('on', on);
+  const title = on ? '取消固定（已在绳上）' : '固定到绳上';
+  pin.title = title;
+  pin.setAttribute('aria-label', title);
+}
+
+function syncPinButton(pin, p) {
+  applyPinVisual(pin, isPinnedPath(p));
+}
+
+function syncPinButtons() {
+  if (!ui.folder) return;
+  for (const pin of els.folderPanel.querySelectorAll('.fp-pin')) {
+    syncPinButton(pin, pin.dataset.path || '');
+  }
+}
+
 /* 缓存自动生成的文件名（img_<时间戳>_<sha1>.ext）不是给人看的：
    早先版本直接把缓存名当挂件名，卡片上就是一串哈希。这类名字改成"图片 · SVG"。 */
 const AUTO_IMAGE_NAME = /^img_[a-z0-9]+_[0-9a-f]{8,}\./i;
@@ -552,16 +573,15 @@ function renderFolderPanel() {
     }
     row.appendChild(th);
 
-    /* 右侧 📌：子文件夹一键固定到绳上（只引用路径，不复制本体）。
+    /* 右侧 📌：点一下固定到绳上，再点一下取消固定（只引用路径，不复制本体）。
        文件行留同宽占位，保证各行缩略图纵向对齐。 */
     if (entry.isDir) {
-      const pinned = isPinnedPath(entry.path);
       const pin = document.createElement('button');
       pin.type = 'button';
-      pin.className = 'fp-pin' + (pinned ? ' on' : '');
+      pin.className = 'fp-pin';
       pin.textContent = '📌';
-      pin.title = pinned ? '已在绳上（点击不重复添加）' : '固定到绳上';
-      pin.setAttribute('aria-label', pin.title);
+      pin.dataset.path = entry.path; // 状态同步时据此回查绳上状态
+      syncPinButton(pin, entry.path);
       // 按下就拦住：不能让行拿到 pointerdown，否则会被当成"按住拖动＝拖出"
       pin.addEventListener('pointerdown', (e) => {
         e.stopPropagation();
@@ -571,21 +591,34 @@ function renderFolderPanel() {
         if (f.index !== i) f.index = i;
         if (pin.dataset.busy === '1') return;
         pin.dataset.busy = '1';
+        // 点击瞬间决定方向：已固定 → 取消；未固定 → 固定。
+        // busy 标志拦住连点，避免一次操作里 both 方向交错。
+        const wasPinned = isPinnedPath(entry.path);
+        let nextOn = wasPinned;
         try {
-          const res = await rope.pinPath(entry.path);
-          if (res && res.ok && res.already) {
+          const res = wasPinned
+            ? await rope.unpinPath(entry.path)
+            : await rope.pinPath(entry.path);
+          if (res && res.ok && wasPinned && res.removed) {
+            toast('已取消固定：' + (res.name || entry.name));
+            nextOn = false;
+          } else if (res && res.ok && wasPinned) {
+            toast((res && res.message) || '绳上没有这个文件夹', true);
+            nextOn = false;
+          } else if (res && res.ok && res.already) {
+            // 状态推送尚未落地时，主进程兜底告知"已经挂上了"，不重复添加
             toast('这个文件夹已经在绳上了');
-            pin.classList.add('on');
-            pin.title = '已在绳上（点击不重复添加）';
+            nextOn = true;
           } else if (res && res.ok) {
             toast('已固定：' + (res.name || entry.name));
-            pin.classList.add('on');
-            pin.title = '已在绳上（点击不重复添加）';
+            nextOn = true;
           } else {
-            toast((res && res.message) || '固定失败', true);
+            toast((res && res.message) || (wasPinned ? '取消固定失败' : '固定失败'), true);
           }
+          // 按操作结果立刻改视觉，不等状态推送；随后 onState 会以真实状态再校准一次
+          applyPinVisual(pin, nextOn);
         } catch (err) {
-          toast('固定失败：' + err.message, true);
+          toast((wasPinned ? '取消固定失败：' : '固定失败：') + err.message, true);
         } finally {
           delete pin.dataset.busy;
         }
@@ -820,6 +853,8 @@ els.copyPill.addEventListener('click', () => rope.toggleCopyMode());
 rope.onState((s) => {
   S = s;
   render();
+  // 绳上状态变了（别处取下 / 拖入 / 清空），展开的面板里 📌 要跟着变
+  syncPinButtons();
 });
 
 rope.onEvent((ev) => {

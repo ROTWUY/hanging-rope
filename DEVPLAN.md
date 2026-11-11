@@ -1,14 +1,14 @@
 # 悬挂绳 · 开发计划（可执行版）
 
-> 依据：`PRD.md` v1.0
+> 依据：`PRD.md` v1.4（自 v1.0 起逐版追加）
 > 约定：✅ = 已实现并通过对应测试/验证；⬜ = 未完成（本计划执行完毕后已无 ⬜ 项）。🧪 表示该阶段必须有可运行测试。
-> 执行方式：按 P0 → P12 顺序推进，每阶段先跑测试，失败先修再进下一阶段。
+> 执行方式：按 P0 → P17 顺序推进，每阶段先跑测试，失败先修再进下一阶段。
 
 ---
 
 ## 0. 范围与完成定义
 
-**范围**：PRD 第 3 章 F1–F11 全部功能 + 第 5 章 AC-01 ~ AC-46。
+**范围**：PRD 第 3 章 F1–F11 全部功能 + 第 5 章 AC-01 ~ AC-50。
 
 **"完成"的定义**（三选一，缺一不可）：
 
@@ -47,6 +47,7 @@
 | P14 | 反馈修复：网页图片破图 + 背景滚轮横向滚动 | ✅ 功能 / ✅ 测试 | AC-37/38/39 |
 | P15 | 反馈修复：设置改为独立普通窗口 | ✅ 功能 / ✅ 测试 | AC-40~43，F10 |
 | P16 | 反馈增强：文件夹面板内 📌 固定子文件夹 | ✅ 功能 / ✅ 测试 | AC-44~46，F5 |
+| P17 | 反馈增强：📌 再点一次取消固定（开关语义） | ✅ 功能 / ✅ 测试 | AC-47~50，AC-45，F5 |
 
 ---
 
@@ -226,6 +227,31 @@
 - ⚠️ 过程中发现 AC-46 一开始是"假通过"：上一步 AC-17 的拖出会把渲染层的 `ui.nativeDrag` 置真 2.5 秒，这期间行的按下事件被直接忽略，于是无论有没有拦截都拖不出去。已改为先等 2.5 秒再做探针，反向验证才真正失败。
 - ✅ 视觉验证：隔离环境截图确认三行排布、灰钉与已固定金色态（`.test/pin-panel.png`、`.test/pin-done.png`）。
 
+### P17 📌 再点一次取消固定（v1.4）
+
+**需求**：文件夹面板里的 📌 不再是"只进不出"的一次性按钮 —— 点一下固定，**再点同一枚即取消固定**，把该子文件夹从绳上取下来；按钮态要跟绳上真实状态一致。
+
+**取舍**：
+
+- 不新增手势、不新增按钮，仍是原地同一枚 📌；方向由"点击瞬间该路径是否已挂在绳上"决定（AC-47/48）。
+- 取消固定走主进程新 IPC，而不是渲染层直接 `removeItem(id)`：路径归一化规则只在 `src/main/paths.js` 维护一份，且能一次摘掉所有等价变体（AC-50）。
+- 取消时**不做 stat 校验**：源目录已被移动 / 删除也要能把挂件取下来。
+- 按钮态不只在点击时改，每次 `onState` 都按绳上真实状态校准一遍（AC-49）。
+
+- ✅ **P17-1** `src/main/paths.js` 新增 `pinnedItems(items, p)`：返回所有指向同一目标的文件 / 文件夹挂件；`pinPath` 的去重与 `unpinPath` 的摘除共用它，规则不漂移。
+- ✅ **P17-2** `main.js` 新增 `unpinPath(raw)`：解 `.lnk` → `pinnedItems` 找全部匹配 → 逐个 `store.removeItem` → `sendState()`；找不到返回 `removed:false`，路径非法返回 `bad-path`；新增 IPC `unpin-path`。`pinPath` 的查找改用 `pinnedItems(...)[0]`。
+- ✅ **P17-3** `preload.js` 暴露 `rope.unpinPath(path)`。
+- ✅ **P17-4** 渲染层新增 `applyPinVisual / syncPinButton / syncPinButtons`：📌 存 `data-path`，点击按 `isPinnedPath` 决定调用 `pinPath` 或 `unpinPath`，toast「已固定 / 已取消固定 / 这个文件夹已经在绳上了」；成功后立刻改视觉（不等状态推送），`onState` 里 `syncPinButtons()` 做最终校准。`dataset.busy` 拦连点，避免一次操作里方向交错。
+- ✅ **P17-5** 既有约束一条不降：📌 上 `pointerdown` / `click` 仍 `stopPropagation()`（AC-46）、面板不关闭（AC-45）、文件行仍是 `.fp-pin-slot` 占位（AC-44）。
+
+**测试**
+
+- ✅ 单元 5 项（追加到 `test/unit/paths.test.js`）：等价变体命中、只算 folder/file、多份变体全部返回、前缀相同不误命中、空值 / 非法输入安全返回。
+- ✅ E2E `basic` 59 → 62 项：把原「再点不重复添加，只提示已经在绳上了」按新需求改为 AC-47「再点 = 取消固定」，新增 AC-48「取消后可重新固定且始终只有一件」、AC-49「从别处取下后 📌 自动熄灭」、AC-50「多份等价变体一次摘净」。**原"不重复添加"的要求没有删除**，改由 AC-48 的固定 → 取消 → 固定循环继续守着。
+- ✅ 反向验证：①去掉 `onState` 里的 `syncPinButtons()` → AC-49 失败（61 通过 / 1 失败）；②把 `unpinPath` 改成只删 `matches[0]` → AC-50 失败「两份应被一次摘净」（61 通过 / 1 失败）。两处均已还原，加固测试代码后又各重跑一次，结论不变。
+- ✅ **稳定性加固（本轮踩坑）**：连续跑全量套件时，basic 里靠"固定 `sleep(700)` + 取最后一个 folder 挂件"定位面板偶发失准 —— 状态推送慢会定位到错误的文件夹，宿主真实光标掠过触发 `mouseleave` 又会在 260ms 后按设计收起面板，曾出现 10 项连带假失败（第一次全绿、第二次 10 失败）。改为：`waitItemId()` 按路径等挂件出现、`openFolderPanel()` 按 `data-id` 精确锁定并条件等待面板展开、AC-50 用 `waitFor` 等两份变体挂件到位；再加 `installMouseShield()` **只拦授信（真实）鼠标边界事件**，合成事件 `isTrusted=false` 仍完整走产品逻辑；AC-49 等待期间模拟"鼠标停在面板上"（产品本来就不收起）。**断言标准一条未改，产品代码未因此改动**；加固后 `npm test` 连续三次 120 项全绿。
+- ✅ 交互细节：按钮 `title` 随状态在「固定到绳上」与「取消固定（已在绳上）」之间切换；金色 `on` 态语义从"只提示"改为"可再点取消"（`styles.css` 注释同步）。
+
 ---
 
 ## 3. 测试矩阵（AC → 手段）
@@ -268,8 +294,12 @@
 | AC-42 绳索收回后设置窗口不消失 | 自动（`hideRope(true)` 后 `isVisible() && !isDestroyed()`） | E2E |
 | AC-43 关闭/重开且唯一 | 自动（Esc 关闭 → `getSettingsWindow()===null` → 重开 `id` 不同、窗口数 2） | E2E |
 | AC-44 文件夹行有 📌、文件行无 | 自动（按行读 `.fp-pin` / `.fp-pin-slot` + 右端间距与垂直居中） | E2E |
-| AC-45 点 📌 固定且不重复 | 自动（挂件数 +1、path/name 断言、`pin.on`、面板未关；再点数量不变 + toast 文案） | 单测 + E2E |
+| AC-45 点 📌 固定且不重复 | 自动（挂件数 +1、path/name 断言、`pin.on`、面板未关；AC-48 循环固定/取消再验不重复） | 单测 + E2E |
 | AC-46 📌 上拖动不触发拖出 | 自动（pin 上 pointerdown→move→up，断言 `dragLog` 长度不变） | E2E |
+| AC-47 再点 📌 取消固定 | 自动（挂件数回到固定前、路径消失、`on` 熄灭、title/toast、面板仍开） | E2E |
+| AC-48 取消后可重新固定且不重复 | 自动（再点后该路径恰好 1 件、总数 = 基准 +1、`on` 亮起） | E2E |
+| AC-49 别处取下后 📌 自动熄灭 | 自动（`rope.removeItem` 后不重开面板，断言 `on` 为假且面板仍开） | E2E |
+| AC-50 等价变体一次全摘 | 自动（同时挂两份大小写变体 → 点一次后全部消失、无新增）+ `pinnedItems` 单测 | 单测 + E2E |
 
 **手工清单（无法自动化，交付时逐条自测）**：
 
@@ -308,18 +338,18 @@ npm run test:e2e  # 只跑 Electron 场景
 
 ---
 
-## 6. 执行结果（2026-11-11，v1.3 更新）
+## 6. 执行结果（2026-11-11，v1.4 更新）
 
 ### 6.1 测试套件与结果
 
 | 套件 | 命令 | 用例数 | 结果 |
 | --- | --- | --- | --- |
-| 单元测试（store / geometry / drag-plan / image-format / paths） | `npm run test:unit` | 44 | 全部通过 |
-| E2E `basic`（形态·悬挂·网页图片·文件夹·📌固定·排序·取件·复制·滚动·设置窗口） | `npm run test:e2e` | 59 | 全部通过 |
+| 单元测试（store / geometry / drag-plan / image-format / paths） | `npm run test:unit` | 49 | 全部通过 |
+| E2E `basic`（形态·悬挂·网页图片·文件夹·📌固定/取消·排序·取件·复制·滚动·设置窗口） | `npm run test:e2e` | 62 | 全部通过 |
 | E2E `shortcut`（.lnk 映射与悬空降级） | `npm run test:e2e` | 6 | 全部通过 |
 | E2E `restore`（恢复上次悬挂） | `npm run test:e2e` | 2 | 全部通过 |
 | E2E `discard`（选择不恢复） | `npm run test:e2e` | 1 | 全部通过 |
-| **合计** | `npm test` | **112** | **连续两次全绿** |
+| **合计** | `npm test` | **120** | **连续三次全绿** |
 
 ### 6.2 反向验证（证明测试不是空跑）
 
@@ -332,6 +362,8 @@ npm run test:e2e  # 只跑 Electron 场景
 | 设置窗口改回 `frame:false` + `alwaysOnTop:true`（P15） | AC-41 失败 | ✗ AC-41「设置窗口是普通窗口」失败：不应该置顶 |
 | 去掉 `pinPath` 的路径去重（P16） | AC-45 失败 | ✗ AC-45「不重复添加」失败：挂件数 +1 |
 | 去掉 📌 的 `pointerdown stopPropagation`（P16） | AC-46 失败 | ✗ AC-46「不应产生拖出载荷」失败（58 通过 / 1 失败） |
+| 去掉 `onState` 里的 `syncPinButtons()`（P17） | AC-49 失败 | ✗ AC-49「📌 自动熄灭」失败：📌 不应还留在已固定态（61 通过 / 1 失败） |
+| `unpinPath` 只删 `matches[0]`（P17） | AC-50 失败 | ✗ AC-50「多份变体一次摘净」失败：两份应被一次摘净（61 通过 / 1 失败） |
 
 以上改动均已还原并重跑，全绿。
 
@@ -350,6 +382,11 @@ npm run test:e2e  # 只跑 Electron 场景
 - `src/main/main.js`（P15）：`openSettingsWindow/notifySettings/settingsSnapshot`、`open-settings`、`settings:info`、`settings:clear-all`；托盘「设置」直接开窗；`__test` 暴露 `openSettingsWindow/getSettingsWindow/settingsSnapshot`。
 - `src/renderer/index.html` / `app.js` / `styles.css`（P15）：移除内嵌 `#settings-panel` 及其逻辑与样式，状态栏「设置」改调 `rope.openSettings()`。
 - `src/main/main.js` + `src/preload/preload.js` + `src/renderer/app.js` + `styles.css`（P16）：`pinPath` 与 IPC `pin-path`、面板行内 📌（含占位、手势隔离、`on` 态）、面板宽度 332。
+- `src/main/paths.js`（P17）：新增 `pinnedItems(items, p)`，固定去重与取消摘除共用同一套归一化判定。
+- `src/main/main.js` + `src/preload/preload.js`（P17）：`unpinPath` 与 IPC `unpin-path`、`rope.unpinPath`；`pinPath` 改用 `pinnedItems`。
+- `src/renderer/app.js` + `styles.css`（P17）：`applyPinVisual / syncPinButton / syncPinButtons`、📌 点击按固定态切换 pin/unpin、`onState` 状态校准、`data-path`、金色态注释语义更新。
+- `test/unit/paths.test.js`（P17）：新增 `pinnedItems` 5 项单测（等价变体、类型过滤、多份全返回、前缀不误命中、非法输入）。
+- `test/e2e/scenarios.js`（P17）：新增 AC-47~50 四条用例；新增 `waitItemId / openFolderPanel / installMouseShield` 三个辅助，文件夹面板定位由"最后一个 folder 挂件 + 固定 sleep"改为按 id 精确定位 + 条件等待；收尾清理路径比较改为大小写不敏感。
 - 新增 `test/unit/*.test.js`（4 个文件 39 项）、`test/e2e/scenarios.js`（4 个场景）、`test/run-tests.js`（运行器，E2E 注入隔离 `LOCALAPPDATA`）。
 - `package.json`：新增 `test` / `test:unit` / `test:e2e`。
 

@@ -72,6 +72,76 @@ async function waitFor(label, fn, timeout = 8000) {
   }
 }
 
+/* 文件夹面板展开：早先版本靠"固定 sleep(700) + 取最后一个 folder 挂件"，
+   连续跑全量套件时偶发失准（状态推送慢 / 真实光标掠过触发 mouseleave 把面板收起）。
+   改为按 id 精确锁定目标挂件 + 条件等待面板真的展开且行数达标；每轮重新 hover，
+   并给面板补一个 mouseenter 以清掉待执行的关闭定时器。断言标准不变。 */
+async function openFolderPanel(win, itemId, minRows = 3) {
+  return waitFor('文件夹面板展开（' + itemId + '）', async () => {
+    const found = await js(
+      win,
+      `(async () => {
+        rope.hover(true);
+        const el = [...document.querySelectorAll('.item')].find(
+          (n) => n.dataset.id === ${JSON.stringify(itemId)}
+        );
+        if (!el) return false;
+        el.dispatchEvent(new MouseEvent('mouseenter'));
+        document.querySelector('#folder-panel').dispatchEvent(new MouseEvent('mouseenter'));
+        return true;
+      })()`
+    );
+    if (!found) return false;
+    await sleep(320); // 200ms hover 延时 + listFolder 往返
+    return js(
+      win,
+      `(() => {
+        const p = document.querySelector('#folder-panel');
+        return !p.hidden && p.querySelectorAll('.fp-row').length >= ${minRows};
+      })()`
+    );
+  }, 12000);
+}
+
+/* 等某个路径的挂件真的出现在 state 里，返回 id（替代固定 sleep 的竞态） */
+async function waitItemId(win, targetPath, label) {
+  return waitFor(label || '挂件出现（' + targetPath + '）', () =>
+    js(
+      win,
+      `rope.getState().then((s) => {
+        const it = s.items.find((i) => i.path === ${JSON.stringify(targetPath)});
+        return it ? it.id : '';
+      })`
+    )
+  );
+}
+
+/* 透明置顶窗口会收到宿主的真实鼠标边界事件：挂件/面板的 mouseleave 会启动
+   "260ms 后收起面板"，连续跑套件时偶发把测试正在观察的面板关掉，造成与产品
+   行为无关的假失败。这里只在测试页面里拦掉授信（真实）的 mouseenter/mouseleave；
+   合成事件 isTrusted=false 仍完整走产品逻辑，断言标准一条没变。
+   与 HANGING_ROPE_TEST_FREEZE_WATCHER 同类：消除环境噪声，不改产品代码。 */
+async function installMouseShield(win) {
+  return waitFor('鼠标事件垫片', () =>
+    js(
+      win,
+      `(() => {
+        if (window.__hrMouseShield) return true;
+        window.__hrMouseShield = true;
+        for (const type of ['mouseenter', 'mouseleave']) {
+          document.addEventListener(type, (e) => {
+            if (e.isTrusted) {
+              e.stopImmediatePropagation();
+              e.preventDefault();
+            }
+          }, true);
+        }
+        return true;
+      })()`
+    )
+  );
+}
+
 /* 等设置窗口出现并加载完（主进程里设置是独立 BrowserWindow） */
 async function waitSettingsWindow() {
   let sw = null;
@@ -117,6 +187,7 @@ async function runBasic(win) {
 
   T.showRope();
   await sleep(500);
+  await installMouseShield(win);
   await check('AC-04 唤出后贴住屏幕顶端（y = 0）', () => {
     assert.equal(win.getBounds().y, 0);
   });
@@ -265,11 +336,8 @@ async function runBasic(win) {
     assert.ok(res.entries.every((e) => e.path && typeof e.isDir === 'boolean'));
   });
 
-  await js(
-    win,
-    `(() => { const el=[...document.querySelectorAll('.item')].find(n=>n.classList.contains('t-folder')); el.dispatchEvent(new MouseEvent('mouseenter')); return true; })()`
-  );
-  await sleep(700);
+  const folderItemId = await waitItemId(win, folderPath, '文件夹挂件出现（AC-15）');
+  await openFolderPanel(win, folderItemId);
 
   const panel = await js(
     win,
@@ -359,12 +427,9 @@ async function runBasic(win) {
   fs.mkdirSync(path.join(pinRoot, '子文件夹B'));
   fs.writeFileSync(path.join(pinRoot, '说明.txt'), 'pin fixture');
   await js(win, `rope.addPaths(${JSON.stringify([pinRoot])})`);
-  await sleep(500);
-  await js(
-    win,
-    `(() => { const els=[...document.querySelectorAll('.item.t-folder')]; els[els.length-1].dispatchEvent(new MouseEvent('mouseenter')); return true; })()`
-  );
-  await sleep(700);
+  const pinItemId = await waitItemId(win, pinRoot, '📌 夹具文件夹挂件出现');
+  // 精确锁定刚挂上的夹具文件夹，不再依赖"最后一个 folder 挂件"这种脆弱假设
+  await openFolderPanel(win, pinItemId);
 
   const pinView = await js(
     win,
@@ -461,28 +526,155 @@ async function runBasic(win) {
     assert.equal(pinned.panelOpen, true);
   });
 
-  const dupCount = await js(win, 'rope.getState().then((s) => s.items.length)');
-  await js(
+  /* --- v1.4：📌 再点一次 = 取消固定（AC-47~AC-50） ---
+     取消的是"子文件夹"挂件；面板对应的父文件夹挂件仍在，所以面板不会关闭。 */
+  const pinnedPath = path.join(pinRoot, pinned.name);
+  await openFolderPanel(win, pinItemId, 1);
+  const unpinned = await js(
     win,
-    `(async () => { document.querySelector('#folder-panel .fp-pin').click(); await new Promise((r) => setTimeout(r, 600)); return true; })()`
+    `(async () => {
+      const pin = document.querySelector('#folder-panel .fp-pin');
+      pin.click();
+      await new Promise((r) => setTimeout(r, 700));
+      const st = await rope.getState();
+      return {
+        items: st.items.map((i) => ({ type: i.type, name: i.name, path: i.path })),
+        pinOn: !!document.querySelector('#folder-panel .fp-pin.on'),
+        pinTitle: document.querySelector('#folder-panel .fp-pin').title,
+        panelOpen: !document.querySelector('#folder-panel').hidden,
+        toast: document.querySelector('#toast').textContent,
+      };
+    })()`
   );
-  await sleep(200);
-  await check('AC-45 同一子文件夹再点 📌 不重复添加，只提示"已经在绳上了"', async () => {
-    assert.equal(await js(win, 'rope.getState().then((s) => s.items.length)'), dupCount);
-    const t = await js(win, 'document.querySelector("#toast").textContent');
-    assert.match(t, /已经在绳上了/);
+
+  await check('AC-47 再点同一个 📌 = 取消固定：挂件取回、📌 熄灭、面板不关闭', () => {
+    assert.equal(unpinned.items.length, pinBefore, '挂件数应回到固定前');
+    assert.ok(
+      !unpinned.items.some((i) => i.path === pinnedPath),
+      '该子文件夹不应还在绳上：' + JSON.stringify(unpinned.items.map((i) => i.path))
+    );
+    assert.equal(unpinned.pinOn, false, '📌 应回到未固定态');
+    assert.match(unpinned.pinTitle, /固定到绳上/);
+    assert.equal(unpinned.panelOpen, true);
+    assert.match(unpinned.toast, /已取消固定/);
+  });
+
+  await openFolderPanel(win, pinItemId, 1);
+  const repin = await js(
+    win,
+    `(async () => {
+      const pin = document.querySelector('#folder-panel .fp-pin');
+      pin.click();
+      await new Promise((r) => setTimeout(r, 700));
+      const st = await rope.getState();
+      return {
+        items: st.items.map((i) => ({ type: i.type, name: i.name, path: i.path })),
+        pinOn: !!document.querySelector('#folder-panel .fp-pin.on'),
+        toast: document.querySelector('#toast').textContent,
+      };
+    })()`
+  );
+
+  await check('AC-48 取消后再点可重新固定，且同一目标始终只有一件（不重复添加）', () => {
+    const hits = repin.items.filter((i) => i.path === pinnedPath);
+    assert.equal(hits.length, 1, '同一路径应恰好一个挂件');
+    assert.equal(hits[0].type, 'folder');
+    assert.equal(repin.items.length, pinBefore + 1);
+    assert.equal(repin.pinOn, true);
+    assert.match(repin.toast, /已固定/);
+  });
+
+  /* AC-49：从别处取下（模拟 Esc 取件 / 清空）后，展开面板里的金色态必须跟着熄灭 */
+  await openFolderPanel(win, pinItemId, 1);
+  const external = await js(
+    win,
+    `(async () => {
+      const st = await rope.getState();
+      const target = st.items.find((i) => i.path === ${JSON.stringify(pinnedPath)});
+      if (target) rope.removeItem(target.id);
+      // 等待期间模拟"鼠标停在面板上"（产品本来就不会收起），不重开面板
+      rope.hover(true);
+      const panelEl = document.querySelector('#folder-panel');
+      for (let k = 0; k < 6; k++) {
+        await new Promise((r) => setTimeout(r, 100));
+        panelEl.dispatchEvent(new MouseEvent('mouseenter'));
+      }
+      const pin = document.querySelector('#folder-panel .fp-pin');
+      return {
+        pinOn: !!pin && pin.classList.contains('on'),
+        panelOpen: !document.querySelector('#folder-panel').hidden,
+        stillThere: (await rope.getState()).items.some((i) => i.path === ${JSON.stringify(
+          pinnedPath
+        )}),
+      };
+    })()`
+  );
+
+  await check('AC-49 从别处取下挂件后，展开面板里的 📌 自动熄灭', () => {
+    assert.equal(external.stillThere, false, '挂件应已被取下');
+    assert.equal(external.panelOpen, true, '取下子文件夹不应关掉父文件夹面板');
+    assert.equal(external.pinOn, false, '📌 不应还留在已固定态');
+  });
+
+  /* AC-50：大小写变体被视为同一目标。故意同时挂两份等价路径，
+     点一次 📌 必须一次全摘，不能出现"点了取消却还剩一张卡片"。 */
+  const variantPath = pinnedPath.toUpperCase();
+  await js(win, `rope.addPaths(${JSON.stringify([pinnedPath, variantPath])})`);
+  let variantBefore = 0;
+  try {
+    variantBefore = await waitFor('两份等价挂件都挂上', async () => {
+      const n = await js(win, 'rope.getState().then((s) => s.items.length)');
+      return n >= pinBefore + 2 ? n : 0;
+    }, 6000);
+  } catch {
+    // 等不到就如实记录当前数量，交给下面的 check 报错，而不是让整个场景崩掉
+    variantBefore = await js(win, 'rope.getState().then((s) => s.items.length)');
+  }
+  await openFolderPanel(win, pinItemId, 1);
+  const variantPinOn = await js(
+    win,
+    `!!document.querySelector('#folder-panel .fp-pin.on')`
+  );
+  const variantAfter = await js(
+    win,
+    `(async () => {
+      const pin = document.querySelector('#folder-panel .fp-pin');
+      pin.click();
+      await new Promise((r) => setTimeout(r, 700));
+      const st = await rope.getState();
+      return {
+        items: st.items.map((i) => i.path || ''),
+        pinOn: !!document.querySelector('#folder-panel .fp-pin.on'),
+        toast: document.querySelector('#toast').textContent,
+      };
+    })()`
+  );
+  const norm = (p) => p.toLowerCase().replace(/\\/g, '/').replace(/\/+$/, '');
+
+  await check('AC-50 等价路径变体的多份挂件被一次取消干净，不残留不新增', () => {
+    assert.equal(variantBefore, pinBefore + 2, '两份等价路径都应挂上（前置条件）');
+    assert.equal(variantPinOn, true, '大小写变体也应被判为"已固定"');
+    assert.equal(variantAfter.items.length, pinBefore, '两份应被一次摘净');
+    assert.ok(
+      !variantAfter.items.some((p) => norm(p) === norm(pinnedPath)),
+      '等价路径不应有残留：' + JSON.stringify(variantAfter.items)
+    );
+    assert.equal(variantAfter.pinOn, false);
+    assert.match(variantAfter.toast, /已取消固定/);
   });
 
   /* 收尾：收起面板、摘掉临时夹具挂件、删掉临时目录，避免影响后续用例 */
   await js(
     win,
-    `(() => { const els=[...document.querySelectorAll('.item.t-folder')]; els[els.length-1].dispatchEvent(new MouseEvent('mouseleave')); return true; })()`
+    `(() => { const el=[...document.querySelectorAll('.item')].find((n) => n.dataset.id === ${JSON.stringify(
+      pinItemId
+    )}); if (el) el.dispatchEvent(new MouseEvent('mouseleave')); return true; })()`
   );
   await sleep(500);
   const pinIds = await js(
     win,
-    `rope.getState().then((s) => s.items.filter((i) => (i.path || '').startsWith(${JSON.stringify(
-      pinRoot
+    `rope.getState().then((s) => s.items.filter((i) => (i.path || '').toLowerCase().startsWith(${JSON.stringify(
+      pinRoot.toLowerCase()
     )})).map((i) => i.id))`
   );
   for (const id of pinIds) await js(win, `rope.removeItem(${JSON.stringify(id)})`);

@@ -557,10 +557,7 @@ function pinPath(raw) {
     return { ok: false, reason: 'missing', message: '目标已不存在' };
   }
 
-  const key = paths.pathKey(path.resolve(p));
-  const existing = store
-    .getItems()
-    .find((it) => (it.type === 'folder' || it.type === 'file') && paths.pathKey(it.path) === key);
+  const existing = paths.pinnedItems(store.getItems(), p)[0];
   if (existing) {
     return { ok: true, already: true, id: existing.id, name: existing.name };
   }
@@ -576,6 +573,29 @@ function pinPath(raw) {
   });
   sendState();
   return { ok: true, already: false, id: item.id, name: item.name };
+}
+
+/**
+ * 取消固定：把该路径对应的文件/文件夹挂件从绳上摘掉。
+ * 文件夹浏览面板里再点一次已固定的 📌 时走这里（v1.4 / AC-47）。
+ *
+ * 与 pinPath 对称，共用 pinnedItems 的路径归一化判定；区别：
+ *  - **不做 stat 校验**：源目录已被移动/删除时，也要能把挂件取下来。
+ *  - **一次摘掉全部同目标挂件**：大小写/斜杠/末尾分隔符变体导致的重复卡片
+ *    不能出现"点了取消却还剩一张"的半吊子状态。
+ */
+function unpinPath(raw) {
+  if (!raw || typeof raw !== 'string') {
+    return { ok: false, reason: 'bad-path', message: '路径无效' };
+  }
+  const resolved = resolveShortcut(raw);
+  const matches = paths.pinnedItems(store.getItems(), resolved.path);
+  if (!matches.length) {
+    return { ok: true, removed: false, count: 0, message: '绳上没有这个文件夹' };
+  }
+  for (const it of matches) store.removeItem(it.id);
+  sendState();
+  return { ok: true, removed: true, count: matches.length, name: matches[0].name };
 }
 
 /** 挂件显示用的可读名称：优先用来源文件名/URL 末段，取不到就用缓存名 */
@@ -954,8 +974,9 @@ function registerIpc() {
     }, 400);
   });
 
-  /* 文件夹浏览面板里点 📌：把子文件夹固定到绳上（去重） */
+  /* 文件夹浏览面板里的 📌：点一下固定，再点一下取消固定（v1.4） */
   ipcMain.handle('pin-path', (_e, p) => pinPath(p));
+  ipcMain.handle('unpin-path', (_e, p) => unpinPath(p));
 
   ipcMain.handle('list-folder', (_e, dir) => {
     try {

@@ -44,6 +44,7 @@ contextBridge.exposeInMainWorld('rope', {
   /* 文件夹浏览 */
   listFolder: (dir) => ipcRenderer.invoke('list-folder', dir),
   pinPath: (p) => ipcRenderer.invoke('pin-path', p),
+  unpinPath: (p) => ipcRenderer.invoke('unpin-path', p),
 
   /* 悬浮窗状态 */
   hover: (on) => ipcRenderer.send('hover', on),

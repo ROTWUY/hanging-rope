@@ -1,14 +1,14 @@
 # 悬挂绳 · 开发计划（可执行版）
 
-> 依据：`PRD.md` v1.5（自 v1.0 起逐版追加）
+> 依据：`PRD.md` v1.6（自 v1.0 起逐版追加）
 > 约定：✅ = 已实现并通过对应测试/验证；⬜ = 未完成（本计划执行完毕后已无 ⬜ 项）。🧪 表示该阶段必须有可运行测试。
-> 执行方式：按 P0 → P18 顺序推进，每阶段先跑测试，失败先修再进下一阶段。
+> 执行方式：按 P0 → P19 顺序推进，每阶段先跑测试，失败先修再进下一阶段。
 
 ---
 
 ## 0. 范围与完成定义
 
-**范围**：PRD 第 3 章 F1–F11 全部功能 + 第 5 章 AC-01 ~ AC-60。
+**范围**：PRD 第 3 章 F1–F11 全部功能 + 第 5 章 AC-01 ~ AC-68。
 
 **"完成"的定义**（三选一，缺一不可）：
 
@@ -49,6 +49,7 @@
 | P16 | 反馈增强：文件夹面板内 📌 固定子文件夹 | ✅ 功能 / ✅ 测试 | AC-44~46，F5 |
 | P17 | 反馈增强：📌 再点一次取消固定（开关语义） | ✅ 功能 / ✅ 测试 | AC-47~50，AC-45，F5 |
 | P18 | 反馈增强：单击复制 / 双击打开 | ✅ 功能 / ✅ 测试 | AC-51~60，AC-13/26，F3/F5 |
+| P19 | 反馈修复：全入口统一去重 + 启动时合并历史重复挂件 | ✅ 功能 / ✅ 测试 | AC-61~68，AC-29/45/59，F2/F7 |
 
 ---
 
@@ -276,6 +277,30 @@
 - ✅ 新增独立 E2E 场景 `click` 15 项：AC-51~AC-60 全覆盖（含取件模式、📌 不受影响、自我悬挂、源丢失、两种手势不误触）。独立场景，不与 basic 抢剪贴板 / `nativeDrag` 保护窗口。
 - ✅ 反向验证见 6.2 表；basic 62 项回归全绿。
 
+### P19 全入口统一去重（v1.6）
+
+**背景**：用户反馈同一个桌面图片文件被挂出两张一模一样的卡片。根因是旧实现只有
+「📌 固定」和「剪贴板监听只比对上一次内容」两处防重复，`addPaths` / `addImageBuffer` /
+`addTextItem` 各自直接 `store.addItem`，跨入口、隔过别的内容后就必然重复。
+
+**实现**
+
+- ✅ **P19-1** 新增 `src/main/dedupe.js` 纯函数：`contentHash / itemKey / itemKeys / candidateKey / findDuplicate / collapseDuplicates`。文件/文件夹按 `pathKey(path.resolve(p))`（大小写、斜杠、末尾分隔符等价）；图片按字节 sha1（老数据无指纹时退回缓存副本路径，且同时登记两个键）；文字按完整内容。身份无法判定的挂件返回空键，**一律放行不误删**。
+- ✅ **P19-2** `store.js`：`sanitizeItem` 保留 `hash` 字段；新增 `replaceItems()` 供启动合并原子替换（不逐条删，避免中间态落盘）。
+- ✅ **P19-3** `main.js` 新增 `duplicateOf(candidate)` 作为唯一判重入口、`ensureImageHashes()` 读缓存副本回填旧图片指纹、`healDuplicates()` 合并历史重复（保留最早一张、顺序不变、只在真的摘掉图片时调 `pruneOrphans()`）。
+- ✅ **P19-4** 所有入口接同一套判定：`addPaths`（含 `seen` 集合做批内互判）、`pinPath`、`addImageBuffer`（判重放在**写缓存之前**，不生成第二份副本）、`addTextItem`、`hangFromClipboard`（文件/文字/图片三分支先过判重）。重复跳过并提示；批量里重复项不影响其它新目标；`addPaths(..., {silent:true})` 让剪贴板分支自己汇总「已悬挂 N 件，跳过 M 个重复项」。
+- ✅ **P19-5** 剪贴板监听基线在**判重之前**更新（无论 force 与否），避免 watcher 每轮对同一内容重复弹提示；AC-29 / AC-59 的既有语义不变。
+- ✅ **P19-6** `app.whenReady()` 在 `store.load() → healShortcuts() → healImageExtensions()` 之后调用 `healDuplicates()`，保证先修正路径/扩展名再算指纹；早于 `createWindow()`，随后 `did-finish-load` 把合并结果推给渲染层。
+- ✅ **P19-7** 测试兼容性（**断言标准一条未降**）：①basic 的 AC-37「mime 撒谎」原来用同一段 SVG 连挂两次，现在按新语义会被正确拦下，改成内容不同（只改一个色值）的第二张 SVG，仍验证 `.svg` 落地与「图片 · SVG」显示；②AC-50 需要"绳上同时存在两份等价变体"作前置，改用测试出口 `injectRawItems()` 注入模拟旧版本 `state.json`，`assert.equal(variantBefore, pinBefore + 2)` 与「一次全摘」断言原样保留。
+
+**测试**
+
+- ✅ 单元 12 项（`test/unit/dedupe.test.js`）：指纹稳定性、路径等价与盘符根、图片双键、空路径不产生键（单测抓到的真 bug：`path.resolve('')` 会解析成 cwd）、跨类型不误判、合并保留最早/顺序/不误删。
+- ✅ 新增独立 E2E 场景 `dedupe` 14 项：AC-61/62/63/64/66/67/68 全覆盖（拖入两次、Ctrl+V、复制即悬挂隔内容回来、路径变体、图片内容与缓存副本数、不同图片不误杀、剪贴板图片强制再挂、文字、.lnk、批量混合、取下后可重挂、失效挂件、DOM 与状态一致）。
+- ✅ 新增独立 E2E 场景 `dedupe-restart` 6 项：预置 8 件（3 组重复）旧版本 `state.json`，验证 AC-65 启动合并、指纹回填、写回落盘、合并后再挂仍不重复。
+- ✅ 三处反向验证见 6.2 表；basic 62 / shortcut 6 / click 15 / restore 2 / discard 1 全部回归全绿。
+- ✅ **稳定性加固（断言标准一条未改，产品代码未因此改动）**：连续全量第 2 轮 basic 的 AC-20「横向拖动过程中顺序跟随指针变化」偶发失败 1 次。根因是测试手势用固定 420ms 等抬起、位移只按被拖卡自身宽度计算，碰到相邻图片卡（120px）时跨不过卡片中心。改为：条件等待 `.item.lifting` 出现、位移取「被拖卡与相邻卡较宽者 + 32」并加大来回幅度、采样间隔 50→70ms、失败信息带上每个采样的 x / 顺序便于诊断。basic 单独连跑 5 次、全量连跑 3 次均全绿。
+
 ---
 
 ## 3. 测试矩阵（AC → 手段）
@@ -334,6 +359,14 @@
 | AC-58 面板行同语义 + 📌 不受影响 | 自动（行单击复制 + 选中、双击打开、📌 固定/取消固定、剪贴板哨兵不变） | E2E |
 | AC-59 复制不自我悬挂 | 自动（开启"复制即悬挂"后单击复制，跨两轮 700ms 轮询挂件数不变） | E2E |
 | AC-60 源丢失明确提示 | 自动（删掉源文件后单击，剪贴板哨兵不变 + toast 含"已丢失"） | E2E |
+| AC-61 全入口不重复挂 | 自动（拖入两次 / Ctrl+V / watcher 隔过别的内容再复制回来 / 文字路径 / .lnk 本体，挂件数与 DOM 数不变 + toast）+ `findDuplicate` 单测 | 单测 + E2E `dedupe` |
+| AC-62 路径等价变体不重复 | 自动（大小写 / 斜杠 / 末尾分隔符三种变体）+ `itemKey` 单测 | 单测 + E2E |
+| AC-63 图片按字节判重 | 自动（同字节第二次返回 null、缓存副本只 +1、不同字节照常挂、剪贴板强制再挂不增） | E2E |
+| AC-64 文字按内容判重 | 自动（同文第二次返回 null、不同文照常挂） | E2E |
+| AC-65 启动合并历史重复 | 自动（预置 8 件含 3 组重复 → 重启剩 5 件、顺序不变、指纹回填、写回 `state.json`、再挂仍不重复） | E2E `dedupe-restart` |
+| AC-66 批量混合不中断 | 自动（4 个目标里 3 个重复 → 只新增 1 件 + 提示含跳过数） | E2E |
+| AC-67 取下后可重新挂 | 自动（`rope.removeItem` 后再 `addPaths` 应 +1）；AC-29 / AC-59 由 `basic` / `click` 场景回归 | E2E |
+| AC-68 失效挂件仍占键 | 自动（注入 `invalid:true` 挂件 → 重建同名文件再挂，数量不变）+ `collapseDuplicates` 单测「无法判定一律保留」 | 单测 + E2E |
 
 **手工清单（无法自动化，交付时逐条自测）**：
 
@@ -344,7 +377,8 @@
 5. 设置窗口里点"更换…"选择目录并确认迁移（AC-34）；顺便看标题栏右上角的 × 是否能关窗（AC-41）。
 6. 网页图片拖入（需联网抓图，重点看 SVG/WebP 和"抓回来是 403 页面"两种情况）（AC-37/38）。
 7. 真实双击挂件 / 面板行，确认系统默认程序确实打开对应对象（自动化为 dry-run，只校验载荷不启动程序）（AC-54）；顺手把单击复制出的文件粘贴到微信 / 资源管理器，确认落下的是文件本体而不是路径文本（AC-52）。
-7. 绳索条内挂件下方空白处滚轮横向滚动（AC-39）。
+8. 绳索条内挂件下方空白处滚轮横向滚动（AC-39）。
+9. 从桌面把**同一个图片文件**用不同方式挂两遍（拖入两次、开启「复制即悬挂」后隔一段别的内容再复制它、绳上 `Ctrl+V`），确认绳上始终只有一张卡片并有「已在绳上」提示；重启程序后，之前已经挂着的重复卡片应自动合并成一张（AC-61/65）。
 
 ---
 
@@ -373,19 +407,21 @@ npm run test:e2e  # 只跑 Electron 场景
 
 ---
 
-## 6. 执行结果（2026-11-11，v1.5 更新）
+## 6. 执行结果（2026-11-12，v1.6 更新）
 
 ### 6.1 测试套件与结果
 
 | 套件 | 命令 | 用例数 | 结果 |
 | --- | --- | --- | --- |
-| 单元测试（store / geometry / drag-plan / image-format / paths / item-action） | `npm run test:unit` | 59 | 全部通过 |
+| 单元测试（store / geometry / drag-plan / image-format / paths / item-action / dedupe） | `npm run test:unit` | 71 | 全部通过 |
 | E2E `basic`（形态·悬挂·网页图片·文件夹·📌固定/取消·排序·取件·复制·滚动·设置窗口） | `npm run test:e2e` | 62 | 全部通过 |
 | E2E `shortcut`（.lnk 映射与悬空降级） | `npm run test:e2e` | 6 | 全部通过 |
 | E2E `restore`（恢复上次悬挂） | `npm run test:e2e` | 2 | 全部通过 |
 | E2E `discard`（选择不恢复） | `npm run test:e2e` | 1 | 全部通过 |
 | E2E `click`（单击复制 / 双击打开，AC-51~60） | `npm run test:e2e` | 15 | 全部通过 |
-| **合计** | `npm test` | **145** | **连续三次全绿** |
+| E2E `dedupe`（全入口去重，AC-61~64/66~68） | `npm run test:e2e` | 14 | 全部通过 |
+| E2E `dedupe-restart`（启动合并历史重复，AC-65） | `npm run test:e2e` | 6 | 全部通过 |
+| **合计** | `npm test` | **177** | **连续三次全绿** |
 
 ### 6.2 反向验证（证明测试不是空跑）
 
@@ -403,6 +439,9 @@ npm run test:e2e  # 只跑 Electron 场景
 | 去掉挂件 `click` 里的 `clickBlocked()`（P18） | AC-56 / AC-57 失败 | ✗ AC-56 两条「手势后不复制」+ AC-57「取件模式不复制」失败（12 通过 / 3 失败） |
 | 去掉 `copyItemToClipboard` 里的 `snapshotClipboard()`（P18） | AC-59 失败 | ✗ AC-59「不自我悬挂」失败：挂件数不应增加（14 通过 / 1 失败） |
 | 恢复 `onRemoveModeEvent` 的 IPC 回环（P18） | AC-58 / AC-60 失败 | ✗ AC-58「双击面板行打开」、AC-60「源丢失提示」失败（13 通过 / 2 失败） |
+| `addPaths` 去掉跨入口 `duplicateOf`（P19） | AC-61 系列失败 | ✗ AC-61 ×3、AC-62、AC-66、AC-68 失败（8 通过 / 6 失败） |
+| `addImageBuffer` 去掉图片判重（P19） | AC-63 失败 | ✗ AC-63 两条「只挂一张 / 不写第二份缓存」失败（12 通过 / 2 失败） |
+| `whenReady` 不调用 `healDuplicates()`（P19） | AC-65 失败 | ✗ AC-65 四条「合并 / 不误删 / 指纹回填 / 写回落盘」失败（2 通过 / 4 失败） |
 
 以上改动均已还原并重跑，全绿。
 
@@ -430,7 +469,11 @@ npm run test:e2e  # 只跑 Electron 场景
 - `src/main/main.js` + `src/preload/preload.js`（P18）：`copyItemToClipboard / openItemTarget`、IPC `copy-item` / `open-item`、`rope.copyItem / rope.openItem`、`openLog` 与 `HANGING_ROPE_TEST_DRY_OPEN`；写剪贴板后刷新监听基线。
 - `src/renderer/app.js`（P18）：单击复制 / 双击打开（挂件 + 面板行）、`clickBlocked / markClickBlocked / actionToastSeq`、`selectFolderRow()` 轻量选中、📌 `dblclick` 隔离、`setRemoveMode` 去回环。
 - 新增 `test/unit/item-action.test.js`（P18，10 项）；`test/e2e/scenarios.js` 新增独立 `click` 场景（15 项）；`test/run-tests.js` 注册该场景并注入 `HANGING_ROPE_TEST_DRY_OPEN`。
-- 新增 `test/unit/*.test.js`（4 个文件 39 项）、`test/e2e/scenarios.js`（4 个场景）、`test/run-tests.js`（运行器，E2E 注入隔离 `LOCALAPPDATA`）。
+- 新增 `src/main/dedupe.js`（P19）：`contentHash / itemKey / itemKeys / candidateKey / findDuplicate / collapseDuplicates`，全入口唯一的判重规则。
+- `src/main/store.js`（P19）：`sanitizeItem` 保留图片 `hash`、新增 `replaceItems()`。
+- `src/main/main.js`（P19）：`duplicateOf / ensureImageHashes / healDuplicates`；`addPaths`（批内 `seen` + `silent`）、`pinPath`、`addImageBuffer`（写缓存前判重 + 写入 `hash`）、`addTextItem`、`hangFromClipboard`（基线提前更新）全部接入；`whenReady` 执行启动合并；`__test` 增加 `injectRawItems` 供回归用例模拟旧数据。
+- 新增 `test/unit/dedupe.test.js`（P19，12 项）；`test/e2e/scenarios.js` 新增独立 `dedupe`（14 项）与 `dedupe-restart`（6 项）场景；`test/run-tests.js` 注册两场景并预置含 3 组重复的旧 `state.json`；basic 的 AC-37 第二张 SVG 改内容、AC-50 前置改注入（断言未改）。
+- 新增 `test/unit/*.test.js`（初始阶段 4 个文件 39 项）、`test/e2e/scenarios.js`（初始阶段 4 个场景）、`test/run-tests.js`（运行器，E2E 注入隔离 `LOCALAPPDATA`）。
 - `package.json`：新增 `test` / `test:unit` / `test:e2e`。
 
 ### 6.4 仍需人工验收的 7 条

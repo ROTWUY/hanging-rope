@@ -80,7 +80,7 @@ function sanitizeItem(raw) {
     return { ...base, type: 'text', text };
   }
   if (raw.type === 'image') {
-    return {
+    const it = {
       ...base,
       type: 'image',
       cachePath: String(raw.cachePath || ''),
@@ -89,6 +89,9 @@ function sanitizeItem(raw) {
       height: Number.isFinite(raw.height) ? raw.height : null,
       bytes: Number.isFinite(raw.bytes) ? raw.bytes : null,
     };
+    // v1.6：图片内容指纹，用于统一去重。老数据没有这个字段，启动时回填。
+    if (typeof raw.hash === 'string' && raw.hash) it.hash = raw.hash;
+    return it;
   }
   return null;
 }
@@ -208,6 +211,13 @@ function save() {
 }
 
 function getItems() {
+  return state.items;
+}
+
+/** 原子替换整份挂件列表：仅用于启动时合并历史重复挂件 */
+function replaceItems(items) {
+  state.items = Array.isArray(items) ? items : [];
+  save();
   return state.items;
 }
 
@@ -391,6 +401,7 @@ module.exports = {
   saveNow,
   healImageExtensions,
   getItems,
+  replaceItems,
   addItem,
   removeItem,
   reorder,

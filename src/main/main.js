@@ -25,6 +25,7 @@ const dragPlan = require('./drag-plan');
 const imageFormat = require('./image-format');
 const paths = require('./paths');
 const itemAction = require('./item-action');
+const dedupe = require('./dedupe');
 
 /* ---------------- 常量 ---------------- */
 const BASE_HEIGHT = 210; // 常规高度（文件夹浏览面板展开时由渲染层调到 370）
@@ -430,7 +431,9 @@ function stopClipWatcher() {
 
 /**
  * 从剪贴板取一件内容挂上绳。
- * force=true 表示用户主动按了 Ctrl+V（忽略“重复内容”判断）。
+ * force=true 表示用户主动按了 Ctrl+V（忽略"连续相同内容"的监听基线）。
+ * 无论是否 force，都要过统一判重：绳上已有同一件内容就不再挂第二张。
+ * 基线在判重前先更新，避免监听轮询每轮都重复弹提示。
  */
 function hangFromClipboard(force = false) {
   /* 1) 文件 / 文件夹（资源管理器复制） */
@@ -438,16 +441,24 @@ function hangFromClipboard(force = false) {
   if (files.length) {
     const sig = 'files:' + files.join('|').toLowerCase();
     if (!force && sig === lastClipFileSig) return { ok: false, reason: 'same' };
-    const dup = force && store.getItems().some((i) => (i.type === 'file' || i.type === 'folder') && files.some((f) => f.toLowerCase() === i.path.toLowerCase()));
-    if (dup) {
-      sendEvent({ type: 'toast', text: '这些文件已经挂在绳上了' });
-      return { ok: false, reason: 'same' };
-    }
     lastClipFileSig = sig;
     lastClipText = '';
-    const added = addPaths(files);
+    lastClipImageHash = '';
+    const fresh = files.filter((f) => !duplicateOf({ type: 'file', path: f }));
+    if (!fresh.length) {
+      sendEvent({ type: 'toast', text: '已在绳上，未重复添加', level: 'ok' });
+      return { ok: false, reason: 'same' };
+    }
+    const added = addPaths(fresh, { silent: true });
     if (added.length) {
-      sendEvent({ type: 'toast', text: '已悬挂剪贴板文件', level: 'ok' });
+      const skipped = files.length - added.length;
+      sendEvent({
+        type: 'toast',
+        text: skipped
+          ? `已悬挂 ${added.length} 件，跳过 ${skipped} 个重复项`
+          : '已悬挂剪贴板文件',
+        level: 'ok',
+      });
       return { ok: true };
     }
     return { ok: false, reason: 'failed' };
@@ -457,14 +468,14 @@ function hangFromClipboard(force = false) {
   const text = clipboard.readText();
   if (text && text.trim()) {
     if (!force && text === lastClipText) return { ok: false, reason: 'same' };
-    const dup = force && store.getItems().some((i) => i.type === 'text' && i.text === text);
-    if (dup) {
-      sendEvent({ type: 'toast', text: '这段文字已经挂在绳上了' });
-      return { ok: false, reason: 'same' };
-    }
     lastClipText = text;
     lastClipImageHash = '';
-    const item = addTextItem(text, true);
+    lastClipFileSig = '';
+    if (duplicateOf({ type: 'text', text })) {
+      sendEvent({ type: 'toast', text: '这段文字已经挂在绳上了', level: 'ok' });
+      return { ok: false, reason: 'same' };
+    }
+    const item = addTextItem(text, true, { silent: true });
     if (item) {
       sendEvent({ type: 'toast', text: '已悬挂剪贴板文字', level: 'ok' });
       return { ok: true };
@@ -477,14 +488,18 @@ function hangFromClipboard(force = false) {
   if (img.isEmpty()) return { ok: false, reason: 'empty' };
   const h = clipImageHash(img);
   if (!force && h === lastClipImageHash) return { ok: false, reason: 'same' };
+  lastClipImageHash = h;
+  lastClipText = '';
+  lastClipFileSig = '';
   const png = img.toPNG();
   if (png.length > MAX_CLIP_IMAGE_BYTES) {
-    lastClipImageHash = h;
     sendEvent({ type: 'toast', text: '剪贴板图片过大，未悬挂', level: 'warn' });
     return { ok: false, reason: 'too-big' };
   }
-  lastClipImageHash = h;
-  lastClipText = '';
+  if (duplicateOf({ type: 'image', buf: png })) {
+    sendEvent({ type: 'toast', text: '这张图片已经在绳上了', level: 'ok' });
+    return { ok: false, reason: 'same' };
+  }
   const savedItem = addImageBuffer(png, 'png', { name: '剪贴板图片', silent: true });
   if (!savedItem) return { ok: false, reason: 'failed' };
   sendEvent({ type: 'toast', text: '已悬挂剪贴板图片', level: 'ok' });
@@ -519,14 +534,19 @@ function looksLikePath(t) {
   return null;
 }
 
-function addTextItem(text, fromWatcher = false) {
+function addTextItem(text, fromWatcher = false, opts = {}) {
   const t = String(text || '');
   if (!t.trim()) return null;
 
-  // 看起来像本地路径 → 直接按文件/文件夹悬挂
+  // 看起来像本地路径 → 直接按文件/文件夹悬挂（去重交给 addPaths 统一处理）
   const asPath = looksLikePath(t);
   if (asPath && statSafe(asPath)) {
-    return addPaths([asPath])[0] || null;
+    return addPaths([asPath], opts)[0] || null;
+  }
+
+  if (duplicateOf({ type: 'text', text: t })) {
+    if (!opts.silent) sendEvent({ type: 'toast', text: '这段文字已经挂在绳上了', level: 'ok' });
+    return null;
   }
 
   if (t.length > store.MAX_TEXT_CHARS) {
@@ -535,11 +555,54 @@ function addTextItem(text, fromWatcher = false) {
   }
   const item = store.addItem({ id: store.newId(), type: 'text', text: t, addedAt: Date.now() });
   sendState();
-  if (!fromWatcher) sendEvent({ type: 'toast', text: '已悬挂文字', level: 'ok' });
+  if (!fromWatcher && !opts.silent) sendEvent({ type: 'toast', text: '已悬挂文字', level: 'ok' });
   return item;
 }
 
 /* ---------------- 新增挂件 ---------------- */
+
+/**
+ * 统一判重入口：所有挂件添加路径（拖入 / 复制即悬挂 / Ctrl+V / 文字路径 /
+ * 📌 固定 / 网页图片）都走这里，保证"什么算同一件"只有一套规则。
+ */
+function duplicateOf(candidate) {
+  if (candidate && candidate.type === 'image') ensureImageHashes();
+  return dedupe.findDuplicate(store.getItems(), candidate);
+}
+
+/**
+ * 老版本图片挂件没有内容指纹，判重时读一次缓存副本补上。
+ * 只补能读到的文件；读不到的（失效挂件）保持原样，由 cachePath 兜底键处理。
+ */
+function ensureImageHashes() {
+  let changed = false;
+  for (const it of store.getItems()) {
+    if (it.type !== 'image' || it.hash || !it.cachePath) continue;
+    try {
+      it.hash = dedupe.contentHash(fs.readFileSync(it.cachePath));
+      changed = true;
+    } catch {
+      /* 副本已丢失：保持无 hash，不阻塞后续添加 */
+    }
+  }
+  if (changed) store.save();
+  return changed;
+}
+
+/**
+ * 启动自愈：合并旧版本已经挂上绳的重复挂件（截图里那两张一模一样的图）。
+ * 保留最早的一张、顺序不变；被摘掉的图片副本交给 pruneOrphans 回收。
+ * 此时窗口还没创建，只改 state，随后 did-finish-load 会把结果推给渲染层。
+ */
+function healDuplicates() {
+  ensureImageHashes();
+  const { kept, removed } = dedupe.collapseDuplicates(store.getItems());
+  if (!removed.length) return 0;
+  store.replaceItems(kept);
+  if (removed.some((it) => it.type === 'image')) store.pruneOrphans();
+  console.log('[hanging-rope] merged duplicate items: ' + removed.length);
+  return removed.length;
+}
 
 function statSafe(p) {
   try {
@@ -590,9 +653,18 @@ function healShortcuts() {
   }
 }
 
-function addPaths(paths) {
+/**
+ * 把文件/文件夹路径挂上绳（拖入、剪贴板文件、Ctrl+V、文字路径都走这里）。
+ * 同一目标 — 大小写/斜杠/末尾分隔符变体、.lnk 与其本体 — 只保留一张；
+ * 重复项跳过并提示，但不影响同一批里其它新目标的添加。
+ * @param {string[]} pathList
+ * @param {{silent?:boolean}} opts silent 供剪贴板监听自己汇总提示
+ */
+function addPaths(pathList, opts = {}) {
   const added = [];
-  for (const raw of paths || []) {
+  let skipped = 0;
+  const seen = new Set(); // 同一次批量里也可能出现等价变体
+  for (const raw of pathList || []) {
     if (!raw) continue;
     const resolved = resolveShortcut(raw);
     const p = resolved.path;
@@ -602,6 +674,13 @@ function addPaths(paths) {
       continue;
     }
     const isDir = st.isDirectory();
+    const candidate = { type: isDir ? 'folder' : 'file', path: p };
+    const key = dedupe.candidateKey(candidate);
+    if ((key && seen.has(key)) || duplicateOf(candidate)) {
+      skipped++;
+      continue;
+    }
+    if (key) seen.add(key);
     const item = store.addItem({
       id: store.newId(),
       type: isDir ? 'folder' : 'file',
@@ -611,6 +690,13 @@ function addPaths(paths) {
       addedAt: Date.now(),
     });
     added.push(item);
+  }
+  if (skipped && !opts.silent) {
+    sendEvent({
+      type: 'toast',
+      text: skipped === 1 ? '已在绳上，未重复添加' : `已跳过 ${skipped} 个重复项`,
+      level: 'ok',
+    });
   }
   if (added.length) sendState();
   return added;
@@ -632,7 +718,8 @@ function pinPath(raw) {
     return { ok: false, reason: 'missing', message: '目标已不存在' };
   }
 
-  const existing = paths.pinnedItems(store.getItems(), p)[0];
+  // 与拖入 / 复制即悬挂共用同一套判重规则（v1.6）
+  const existing = duplicateOf({ type: st.isDirectory() ? 'folder' : 'file', path: p });
   if (existing) {
     return { ok: true, already: true, id: existing.id, name: existing.name };
   }
@@ -723,6 +810,14 @@ function addImageBuffer(buf, extHint, opts = {}) {
     return null;
   }
 
+  // 判重必须在写缓存之前：同一张图片不再生成第二份副本（v1.6）。
+  // 指纹取落盘的真实字节，剪贴板图片 / 网页图片 / 拖入图片只要字节相同就算同一件。
+  const hash = dedupe.contentHash(bytes);
+  if (duplicateOf({ type: 'image', buf: bytes })) {
+    if (!opts.silent) sendEvent({ type: 'toast', text: '这张图片已经在绳上了', level: 'ok' });
+    return null;
+  }
+
   const saved = store.saveImageToCache(bytes, ext);
   let size = { width: null, height: null };
   if (ext === 'svg') {
@@ -740,6 +835,7 @@ function addImageBuffer(buf, extHint, opts = {}) {
     type: 'image',
     cachePath: saved.path,
     name: readableImageName(nameHint, saved.name),
+    hash,
     width: size.width,
     height: size.height,
     bytes: bytes.length,
@@ -1191,6 +1287,8 @@ app.whenReady().then(async () => {
   // 旧版本把 SVG 存成了 .svgxml 这类错误扩展名，界面上就是破图；启动时按字节纠正
   const healedImages = store.healImageExtensions();
   if (healedImages) console.log('[hanging-rope] healed image extensions: ' + healedImages);
+  // 旧版本没有统一去重，绳上可能已经挂着两张一模一样的卡片；启动时合并成一张
+  healDuplicates();
   createWindow();
   createTray();
   registerIpc();
@@ -1300,6 +1398,16 @@ if (process.env.HANGING_ROPE_TEST_USERDATA) {
     addTextItem,
     addImageBuffer,
     addImageFromUrl,
+    healDuplicates,
+    ensureImageHashes,
+    /* 模拟旧版本遗留的重复挂件（绕过产品入口的去重），供 AC-50 等回归用例构造前置数据 */
+    injectRawItems: (items) => {
+      const arr = store.getItems();
+      for (const raw of items || []) arr.push({ ...raw });
+      store.save();
+      sendState();
+      return arr.length;
+    },
     planDrag,
     dragLog,
     openLog,

@@ -96,6 +96,27 @@ if (only === 'all' || only === 'e2e') {
   e2e('basic', {});
   e2e('shortcut', {});
   e2e('click', {});
+  e2e('dedupe', {});
+
+  // 启动自愈场景：预置旧版本 state.json（含 3 组重复挂件），验证重启后合并
+  const dupDir = mkUserData('dedupe-restart');
+  const oldPng = fs.readFileSync(path.join(ROOT, 'assets', 'icon.png'));
+  const oldImgA = path.join(dupDir, 'old-cache-a.png');
+  const oldImgB = path.join(dupDir, 'old-cache-b.png');
+  fs.writeFileSync(oldImgA, oldPng);
+  fs.writeFileSync(oldImgB, oldPng);
+  const dupItems = [
+    { id: 'legacy-file-a', type: 'file', path: path.join(ROOT, 'package.json'), name: 'package.json', addedAt: 1 },
+    { id: 'legacy-file-b', type: 'file', path: path.join(ROOT, 'PACKAGE.JSON'), name: 'PACKAGE.JSON', addedAt: 2 },
+    { id: 'legacy-img-a', type: 'image', cachePath: oldImgA, name: 'a.png', addedAt: 3 },
+    { id: 'legacy-img-b', type: 'image', cachePath: oldImgB, name: 'b.png', addedAt: 4 },
+    { id: 'legacy-text-a', type: 'text', text: '重复文字', addedAt: 5 },
+    { id: 'legacy-text-b', type: 'text', text: '重复文字', addedAt: 6 },
+    { id: 'keep-file', type: 'folder', path: path.join(ROOT, 'src'), name: 'src', addedAt: 7 },
+    { id: 'keep-text', type: 'text', text: '另一段文字', addedAt: 8 },
+  ];
+  seedState(dupDir, dupItems);
+  e2e('dedupe-restart', { HANGING_ROPE_RESTORE_ANSWER: 'restore' }, dupDir);
 
   // 恢复场景：预置 4 件内容（文字 / 图片 / 文件 / 文件夹）
   const seedItems = [

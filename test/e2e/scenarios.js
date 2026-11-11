@@ -2,7 +2,7 @@
  * 悬挂绳 —— Electron 端到端场景
  *
  * 用法（由 test/run-tests.js 调用，不建议手工直接跑）：
- *   HR_SCENARIO=basic|restore|discard|shortcut|click
+ *   HR_SCENARIO=basic|restore|discard|shortcut|click|dedupe|dedupe-restart
  *   HANGING_ROPE_TEST_USERDATA=<临时目录>
  *
  * 说明：
@@ -289,12 +289,15 @@ async function runBasic(win) {
   });
 
   /* CDN 常把图片报成 application/octet-stream 或干脆报错类型：
-     扩展名以字节为准，不能被 mime 带偏 */
+     扩展名以字节为准，不能被 mime 带偏。
+     v1.6 起图片按内容去重，所以这张必须和上面的 SVG 内容不同（只改一个色值），
+     否则会作为"同一张图"被正确拦下，测不到 mime 纠错。断言标准不变。 */
+  const liarSvgBody = svgBody.replace('#e2a34a', '#e2a34b');
   const beforeLiar = await itemCount(win);
   await js(
     win,
     `(() => {
-      const bytes = new TextEncoder().encode(${JSON.stringify(svgBody)});
+      const bytes = new TextEncoder().encode(${JSON.stringify(liarSvgBody)});
       rope.addImageBuffer(bytes, '', { mime: 'image/png', name: 'img_mwau6kh0_66f704f6e4fa2af5bc98.png' });
       return true;
     })()`
@@ -617,10 +620,14 @@ async function runBasic(win) {
     assert.equal(external.pinOn, false, '📌 不应还留在已固定态');
   });
 
-  /* AC-50：大小写变体被视为同一目标。故意同时挂两份等价路径，
-     点一次 📌 必须一次全摘，不能出现"点了取消却还剩一张卡片"。 */
+  /* AC-50：大小写变体被视为同一目标。v1.6 起所有产品入口统一去重，
+     所以这两份"历史遗留的重复卡片"改用测试出口直接注入（模拟旧版本 state.json），
+     断言标准不变：点一次 📌 必须一次全摘，不能出现"点了取消却还剩一张卡片"。 */
   const variantPath = pinnedPath.toUpperCase();
-  await js(win, `rope.addPaths(${JSON.stringify([pinnedPath, variantPath])})`);
+  T.injectRawItems([
+    { id: 'legacy-pin-a', type: 'folder', path: pinnedPath, name: path.basename(pinnedPath), addedAt: 1 },
+    { id: 'legacy-pin-b', type: 'folder', path: variantPath, name: path.basename(variantPath), addedAt: 2 },
+  ]);
   let variantBefore = 0;
   try {
     variantBefore = await waitFor('两份等价挂件都挂上', async () => {
@@ -720,25 +727,37 @@ async function runBasic(win) {
       const mk = (x, y) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true });
       el.dispatchEvent(new PointerEvent('pointerdown', mk(r.left + 20, r.top + 20)));
       const before = { press: !!ui.press, reorder: !!ui.reorder, native: ui.nativeDrag, connected: el.isConnected };
-      // 等抬起：定时器 150ms，渲染进程忙时可能被推迟，留足余量
-      await new Promise((res) => setTimeout(res, 420));
+      // 等抬起：定时器 150ms，渲染进程忙时可能被推迟，用条件等待而不是写死时长
+      await new Promise((resolve) => {
+        const t0 = Date.now();
+        const tick = () => {
+          if (document.querySelector('.item.lifting')) return resolve();
+          if (Date.now() - t0 > 2000) return resolve();
+          setTimeout(tick, 25);
+        };
+        tick();
+      });
       const samples = [];
-      // 位移按“被拖卡片宽度 + 间距”算：图片卡（120px）与文件卡（86px）宽度不同，
-      // 写死像素会在图片卡上跨不过相邻卡片的中心，导致顺序根本不换位
-      const step = r.width + 16;
-      for (const k of [0.3, 0.9, 1.6, 0.9, 0.3, 0]) {
-        document.dispatchEvent(new PointerEvent('pointermove', mk(r.left + 20 + step * k, r.top + 20)));
-        await new Promise((res) => setTimeout(res, 50));
+      // 位移按"被拖卡片与相邻卡片里更宽的那个 + 间距"算：图片卡 120px、
+      // 文件卡 86px，写死像素或只看自己宽度都可能跨不过相邻卡片的中心。
+      const next = el.nextElementSibling;
+      const step = Math.max(r.width, next ? next.getBoundingClientRect().width : 86) + 32;
+      for (const k of [0, 0.6, 1.4, 2.6, 1.4, 0.6, 0]) {
+        const x = r.left + 20 + step * k;
+        document.dispatchEvent(new PointerEvent('pointermove', mk(x, r.top + 20)));
+        await new Promise((res) => setTimeout(res, 70));
         const lifted = document.querySelector('.item.lifting');
         samples.push({
           lifted: !!lifted,
+          x: Math.round(x),
+          reordering: !!ui.reorder,
           opacity: lifted ? getComputedStyle(lifted).opacity : '',
           anims: lifted ? lifted.getAnimations().length : -1,
           order: [...document.querySelectorAll('.item')].map((n) => n.dataset.id).join(','),
         });
       }
       document.dispatchEvent(new PointerEvent('pointerup', mk(r.left + 20, r.top + 20)));
-      return { samples, before, width: r.width, cls: el.className };
+      return { samples, before, width: r.width, step, cls: el.className };
     })()`
   );
 
@@ -755,7 +774,15 @@ async function runBasic(win) {
   });
   await check('AC-20 横向拖动过程中顺序跟随指针变化', () => {
     const orders = new Set(flick.samples.filter((s) => s.lifted).map((s) => s.order));
-    assert.ok(orders.size >= 2, '顺序应随指针变化');
+    assert.ok(
+      orders.size >= 2,
+      '顺序应随指针变化：' +
+        JSON.stringify({
+          step: flick.step,
+          cls: flick.cls,
+          samples: flick.samples.map((s) => ({ x: s.x, lifted: s.lifted, reordering: s.reordering, order: s.order })),
+        })
+    );
   });
 
   /* --- 取件模式 --- */
@@ -1436,6 +1463,262 @@ async function runClick(win) {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
+/* ---------------- 统一去重（v1.6 / AC-61~AC-68） ---------------- */
+
+async function runDedupe(win) {
+  T.showRope();
+  await sleep(400);
+
+  const { nativeImage } = require('electron');
+  const count = () => T.snapshot().items.length;
+  const pathsOf = (p) => T.snapshot().items.filter((i) => i.path === p).length;
+  const toastText = () => js(win, 'document.querySelector("#toast").textContent');
+  const clearToast = () =>
+    js(win, `(() => { document.querySelector('#toast').textContent = ''; return true; })()`);
+  const cacheDir = path.join(process.env.LOCALAPPDATA || os.tmpdir(), 'HangingRope', 'cache');
+  const cacheFiles = () => {
+    try {
+      return fs.readdirSync(cacheDir).length;
+    } catch {
+      return 0;
+    }
+  };
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-dedupe-'));
+  const deskFile = path.join(root, 'PixPin_桌面截图.png');
+  fs.writeFileSync(deskFile, fs.readFileSync(path.join(ROOT, 'assets', 'icon.png')));
+  const otherFile = path.join(root, '另一张.txt');
+  fs.writeFileSync(otherFile, 'other');
+  const aDir = path.join(root, '文件夹');
+  fs.mkdirSync(aDir);
+  const png = fs.readFileSync(deskFile);
+
+  /* AC-61：同一个桌面文件从"拖入"入口连续挂两次（走真实 IPC 链路） */
+  const n0 = count();
+  await js(win, `rope.addPaths(${JSON.stringify([deskFile])}); true`);
+  await waitFor('第一张桌面文件挂上', () => count() === n0 + 1);
+  await clearToast();
+  await js(win, `rope.addPaths(${JSON.stringify([deskFile])}); true`);
+  await sleep(350);
+  const dupToast1 = await toastText();
+  await check('AC-61 同一个桌面文件重复拖入只挂一张，并有去重提示', () => {
+    assert.equal(count(), n0 + 1);
+    assert.equal(pathsOf(deskFile), 1);
+    assert.match(dupToast1, /重复|已在绳上/);
+  });
+
+  /* AC-61：绳上已有同一文件时，Ctrl+V 粘贴同一个文件也不重复 */
+  await clearToast();
+  clipboard.clear();
+  clipboard.writeBuffer('FileNameW', Buffer.from(deskFile + '\0', 'utf16le'));
+  T.onPastePressed();
+  await sleep(350);
+  const dupToast2 = await toastText();
+  await check('AC-61 绳上已有同一文件时 Ctrl+V 也不重复挂', () => {
+    assert.equal(count(), n0 + 1);
+    assert.match(dupToast2, /重复|已在绳上/);
+  });
+
+  /* AC-61：复制即悬挂 —— 中间复制过别的内容后，再复制回同一段仍不重复挂。
+     这是旧实现最容易漏的场景：监听基线只记"上一次内容"，绳上其实早就有了。 */
+  clipboard.clear();
+  await js(win, `rope.toggleCopyMode(); true`);
+  await sleep(250);
+  const nWatch = count();
+  clipboard.writeText('去重-watch-A');
+  await waitFor('watcher 挂上 A', () => count() === nWatch + 1, 8000);
+  clipboard.writeText('去重-watch-B');
+  await waitFor('watcher 挂上 B', () => count() === nWatch + 2, 8000);
+  await clearToast();
+  clipboard.writeText('去重-watch-A');
+  await sleep(1100); // 至少跨过一次 CLIP_POLL_MS
+  const dupToast3 = await toastText();
+  await check('AC-61 复制即悬挂：隔过其它内容后再复制同一段，仍不重复挂', () => {
+    assert.equal(count(), nWatch + 2);
+    assert.match(dupToast3, /已经挂在绳上|重复/);
+  });
+  await js(win, `rope.toggleCopyMode(); true`);
+  await sleep(150);
+
+  /* AC-62：大小写 / 斜杠方向 / 末尾分隔符变体都算同一目标 */
+  const nVar = count();
+  T.addPaths([deskFile.toUpperCase(), deskFile.replace(/\\/g, '/')]);
+  T.addPaths([aDir]);
+  T.addPaths([aDir.toUpperCase() + '\\']);
+  await sleep(250);
+  await check('AC-62 大小写/斜杠/末尾分隔符变体都算同一目标，不重复挂', () => {
+    assert.equal(count(), nVar + 1, '只有新文件夹应该挂上');
+    assert.equal(pathsOf(aDir), 1);
+    assert.equal(pathsOf(deskFile), 1);
+  });
+
+  /* AC-63：同一张图片按字节判重，且不写第二份缓存副本 */
+  const cacheBefore = cacheFiles();
+  const nImg = count();
+  const img1 = T.addImageBuffer(png, 'png', { mime: 'image/png', name: 'PixPin.png' });
+  const img2 = T.addImageBuffer(png, 'png', { mime: 'image/png', name: 'PixPin-副本.png' });
+  await sleep(250);
+  await check('AC-63 同一张图片重复添加只挂一张，且不生成第二份缓存副本', () => {
+    assert.ok(img1 && img1.hash, '首次应挂上并写入内容指纹');
+    assert.equal(img2, null, '第二次应被判重拦下');
+    assert.equal(count(), nImg + 1);
+    assert.equal(cacheFiles(), cacheBefore + 1);
+  });
+
+  const png2 = Buffer.concat([png, Buffer.from([0])]);
+  const img3 = T.addImageBuffer(png2, 'png', { mime: 'image/png', name: '另一张图.png' });
+  await check('AC-63 不同图片内容仍可正常挂上（不误杀）', () => {
+    assert.ok(img3 && img3.id);
+    assert.notEqual(img3.hash, img1.hash);
+    assert.equal(count(), nImg + 2);
+    assert.equal(cacheFiles(), cacheBefore + 2);
+  });
+
+  /* AC-63：剪贴板图片强制再挂一次同样不重复（首次是否新增取决于系统是否
+     重新编码 PNG，这里只要求"第二次不再增加"，不依赖具体字节）。 */
+  clipboard.clear();
+  clipboard.writeImage(nativeImage.createFromPath(deskFile));
+  T.onPastePressed();
+  await sleep(350);
+  const afterFirstClipImg = count();
+  await clearToast();
+  T.onPastePressed();
+  await sleep(350);
+  const clipImgToast = await toastText();
+  await check('AC-63 剪贴板图片：强制再挂一次也不会重复', () => {
+    assert.equal(count(), afterFirstClipImg);
+    assert.match(clipImgToast, /已经在绳上|重复|已悬挂/);
+  });
+
+  /* AC-64：文字按内容判重 */
+  const nText = count();
+  const t1 = T.addTextItem('去重-固定文字');
+  const t2 = T.addTextItem('去重-固定文字');
+  const t3 = T.addTextItem('去重-不同文字');
+  await check('AC-64 同一段文字不重复挂，不同文字照常挂', () => {
+    assert.ok(t1 && t1.id);
+    assert.equal(t2, null);
+    assert.ok(t3 && t3.id);
+    assert.equal(count(), nText + 2);
+  });
+
+  /* AC-61：.lnk 解析出的本体、以及"看起来像路径的文字"都指向已挂文件 */
+  const nLnk = count();
+  const lnk = path.join(root, '桌面截图 快捷方式.lnk');
+  let lnkOk = false;
+  try {
+    lnkOk = shell.writeShortcutLink(lnk, 'create', { target: deskFile });
+  } catch {
+    lnkOk = false;
+  }
+  T.addPaths([lnk]);
+  T.addTextItem(deskFile);
+  await check('AC-61 .lnk 本体与文字路径都指向已挂文件，不重复挂', () => {
+    assert.equal(lnkOk, true, '前置：快捷方式创建成功');
+    assert.equal(count(), nLnk);
+    assert.equal(pathsOf(deskFile), 1);
+  });
+
+  /* AC-66：批量里重复项跳过、新目标照常挂上，不因一条重复中断整批 */
+  const nBatch = count();
+  await clearToast();
+  const added = T.addPaths([deskFile, otherFile, aDir, deskFile.toUpperCase()]);
+  await sleep(300);
+  const batchToast = await toastText();
+  await check('AC-66 批量里重复项跳过、新目标照常挂上（不中断整批）', () => {
+    assert.equal(added.length, 1);
+    assert.equal(added[0].path, otherFile);
+    assert.equal(count(), nBatch + 1);
+    assert.match(batchToast, /跳过|重复|已在绳上/);
+  });
+
+  /* AC-67：去重不是"永久黑名单"，取下同一目标后仍可重新挂上 */
+  const otherId = T.snapshot().items.find((i) => i.path === otherFile).id;
+  await js(win, `rope.removeItem(${JSON.stringify(otherId)}); true`);
+  await waitFor('取下生效', () => !T.snapshot().items.some((i) => i.id === otherId));
+  const nRe = count();
+  T.addPaths([otherFile]);
+  await check('AC-67 去重只在绳上已有该目标时生效；取下后可重新挂上', () => {
+    assert.equal(count(), nRe + 1);
+    assert.equal(pathsOf(otherFile), 1);
+  });
+
+  /* AC-68：源曾丢失的失效挂件仍占着同一路径，重建文件后也不该挂出第二张 */
+  const gone = path.join(root, '失效目标.txt');
+  T.injectRawItems([
+    { id: 'legacy-invalid', type: 'file', path: gone, name: '失效目标.txt', invalid: true, addedAt: 1 },
+  ]);
+  fs.writeFileSync(gone, 'back');
+  const nGone = count();
+  T.addPaths([gone]);
+  await check('AC-68 源曾丢失的失效挂件仍占同一路径，不会被重复挂上', () => {
+    assert.equal(count(), nGone);
+    assert.equal(pathsOf(gone), 1);
+  });
+
+  await sleep(300);
+  await check('AC-61 渲染层卡片数与主进程状态一致（没有藏起来的重复卡片）', async () => {
+    assert.equal(await itemCount(win), count());
+  });
+
+  await check('AC-36 本场景无渲染进程崩溃记录', () => {
+    assert.equal(fs.existsSync(path.join(userData, 'crash.log')), false);
+  });
+
+  fs.rmSync(root, { recursive: true, force: true });
+}
+
+/* 启动时合并历史重复挂件：state.json 由 run-tests.js 预置，模拟旧版本数据 */
+async function runDedupeRestart(win) {
+  const items = T.snapshot().items;
+  const dedupe = require(path.join(ROOT, 'src', 'main', 'dedupe'));
+  const png = fs.readFileSync(path.join(ROOT, 'assets', 'icon.png'));
+
+  await check('AC-65 启动时把历史重复挂件合并成一张，保留最早一张且顺序不变', () => {
+    assert.deepEqual(
+      items.map((i) => i.id),
+      ['legacy-file-a', 'legacy-img-a', 'legacy-text-a', 'keep-file', 'keep-text']
+    );
+  });
+
+  await check('AC-65 大小写路径变体、相同文字被摘除；不同文件/文字全部保留', () => {
+    assert.equal(items.filter((i) => i.type === 'file' && /legacy-file/.test(i.id)).length, 1);
+    assert.equal(items.filter((i) => i.type === 'image' && /legacy-img/.test(i.id)).length, 1);
+    assert.equal(items.filter((i) => i.type === 'text' && i.text === '重复文字').length, 1);
+    assert.ok(items.some((i) => i.id === 'keep-file' && i.type === 'folder'));
+    assert.ok(items.some((i) => i.id === 'keep-text' && i.text === '另一段文字'));
+  });
+
+  await check('AC-65 旧图片挂件被回填内容指纹（两份副本内容相同才合并）', () => {
+    const img = items.find((i) => i.id === 'legacy-img-a');
+    assert.ok(img && img.hash, '应补上 hash');
+    assert.equal(img.hash, dedupe.contentHash(png));
+  });
+
+  await check('AC-65 合并结果写回 state.json，重启不会让重复挂件复活', async () => {
+    const raw = await waitFor('state.json 写回', () => {
+      try {
+        const s = JSON.parse(fs.readFileSync(path.join(userData, 'state.json'), 'utf8'));
+        return s.items.length === 5 ? s : null;
+      } catch {
+        return null;
+      }
+    }, 6000);
+    assert.equal(raw.items.length, 5);
+    assert.ok(!raw.items.some((i) => /legacy-file-b|legacy-img-b|legacy-text-b/.test(i.id)));
+  });
+
+  await check('AC-65 合并后再走产品入口挂同一目标，仍然不会重复', () => {
+    const before = T.snapshot().items.length;
+    T.addPaths([path.join(ROOT, 'package.json')]);
+    assert.equal(T.snapshot().items.length, before);
+  });
+
+  await check('AC-36 本场景无渲染进程崩溃记录', () => {
+    assert.equal(fs.existsSync(path.join(userData, 'crash.log')), false);
+  });
+}
+
 /* ---------------- 主流程 ---------------- */
 
 (async () => {
@@ -1452,6 +1735,8 @@ async function runClick(win) {
   else if (scenario === 'discard') await runRestore(win, false);
   else if (scenario === 'shortcut') await runShortcut(win);
   else if (scenario === 'click') await runClick(win);
+  else if (scenario === 'dedupe') await runDedupe(win);
+  else if (scenario === 'dedupe-restart') await runDedupeRestart(win);
   else throw new Error('未知场景：' + scenario);
 
   console.log(`[e2e] ${scenario}: ${passes} 通过 / ${failures} 失败`);

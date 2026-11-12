@@ -204,6 +204,46 @@ async function runBasic(win) {
     );
     assert.equal(ok, true);
   });
+  await check('AC-69 文字挂件只显示一处正文，下方不再重复首行摘要', async () => {
+    const r = await js(
+      win,
+      `(() => {
+        const el = document.querySelector('.item.t-text');
+        if (!el) return null;
+        const pre = el.querySelector('.text-preview');
+        return {
+          names: el.querySelectorAll('.name').length,
+          previews: el.querySelectorAll('.text-preview').length,
+          body: el.textContent.trim(),
+          preview: pre ? pre.textContent.trim() : '',
+        };
+      })()`
+    );
+    assert.ok(r, '文字挂件应存在');
+    assert.equal(r.names, 0, '不应再有名称行');
+    assert.equal(r.previews, 1, '应恰好一个正文预览块');
+    assert.equal(r.body, r.preview, '卡片里不应有第二处文字');
+    assert.equal(r.body, text, '去掉摘要后正文仍要完整显示');
+  });
+  await check('AC-71 文字预览撑满卡片、卡片高度不变', async () => {
+    const r = await js(
+      win,
+      `(() => {
+        const el = document.querySelector('.item.t-text');
+        const pre = el.querySelector('.text-preview');
+        return {
+          // offsetHeight 取布局高度：入场动画的 scale 会影响 getBoundingClientRect，
+          // 用 rect 会在动画播放期间读到 104 * 0.94 这种假数值
+          cardH: el.offsetHeight,
+          thumbH: el.querySelector('.thumb').offsetHeight,
+          clamp: getComputedStyle(pre).getPropertyValue('-webkit-line-clamp').trim(),
+        };
+      })()`
+    );
+    assert.equal(r.cardH, 104, '卡片总高保持 104px');
+    assert.ok(r.thumbH > 70, '预览区应占满原本名称行腾出的空间，而不是留一块空白');
+    assert.equal(r.clamp, '6', '正文预览行数应随高度增加');
+  });
 
   await js(win, `rope.addText(${JSON.stringify('x'.repeat(50001))})`);
   await sleep(500);
@@ -223,6 +263,25 @@ async function runBasic(win) {
     );
     assert.ok(info.cls.includes('t-image'), '应带 t-image 类');
     assert.equal(info.img, true, '应渲染 <img> 预览');
+  });
+  await check('AC-70 其它类型挂件的名称行保持原样、两类卡片尺寸各自不变', async () => {
+    const r = await js(
+      win,
+      `(() => {
+        const img = [...document.querySelectorAll('.item')].find((n) => n.classList.contains('t-image'));
+        const txt = document.querySelector('.item.t-text');
+        const nm = img && img.querySelector('.name');
+        return {
+          name: nm ? nm.textContent.trim() : '',
+          imgH: img ? img.offsetHeight : 0,
+          txtH: txt ? txt.offsetHeight : 0,
+        };
+      })()`
+    );
+    assert.equal(r.name, 'icon.png', '文件/图片挂件仍要显示文件名');
+    // 图片卡本来就比文字卡高（124 vs 104，见 .item.t-image），各自保持原尺寸即可
+    assert.equal(r.txtH, 104, '文字卡总高保持 104px');
+    assert.equal(r.imgH, 124, '图片卡总高保持 124px');
   });
 
   const folderPath = path.join(ROOT, 'src');

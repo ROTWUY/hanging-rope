@@ -374,6 +374,18 @@ body {
   word-break: break-all;
 }
 
+/* 文字挂件只有这一处正文：预览块撑满整张卡片，多显示几行，
+   下面不再排一行重复的首行摘要（卡片总高保持 104px 不变）。 */
+.item.t-text .thumb {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.item.t-text .text-preview {
+  -webkit-line-clamp: 6;
+}
+
 .item.invalid {
   opacity: 0.5;
 }

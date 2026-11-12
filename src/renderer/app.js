@@ -50,11 +50,6 @@ function extOf(name) {
   return m ? m[1].toUpperCase() : '';
 }
 
-function textName(text) {
-  const first = (text || '').trim().split(/\r?\n/)[0] || '文字';
-  return first.length > 40 ? first.slice(0, 40) + '…' : first;
-}
-
 /* 图片扩展名：这类"文件"挂件直接渲染原图预览 */
 const IMG_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|ico|avif)$/i;
 
@@ -245,11 +240,15 @@ function buildItem(item) {
   buildThumb(thumb, item);
   el.appendChild(thumb);
 
-  const name = document.createElement('div');
-  name.className = 'name';
-  name.textContent = item.type === 'text' ? textName(item.text) : itemLabel(item);
-  if (item.invalid) name.textContent = (item.name || '') + '（源已丢失）';
-  el.appendChild(name);
+  /* 正文已经由 .text-preview 完整展示，文字挂件下面不再重复一行首行摘要。
+     文件/文件夹/图片的名称行仍然保留，用来辨认目标。 */
+  if (item.type !== 'text') {
+    const name = document.createElement('div');
+    name.className = 'name';
+    name.textContent = itemLabel(item);
+    if (item.invalid) name.textContent = (item.name || '') + '（源已丢失）';
+    el.appendChild(name);
+  }
 
   wireItem(el, item);
   // 入场动画只播一次：结束后摘掉类，避免后续 DOM 重排时重播

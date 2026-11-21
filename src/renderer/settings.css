@@ -11,8 +11,10 @@
   --card-line: #e3e8f0;
   --line: #e6eaf1;
   --text: #1f2430;
-  --text-dim: #5f6875;
-  --text-faint: #98a1ae;
+  --text-dim: #566070;
+  /* v1.20c：#98a1ae 在白底上只有 ~2.6:1，低于 WCAG 小字 4.5:1 的下限，
+     用户反馈"看不清"。压深到 ~4.9:1，仍是灰阶层级里最浅的一档。 */
+  --text-faint: #747e8c;
   --accent: #4b86f5;
   --accent-strong: #2f6fe0;
   --accent-soft: #eaf1ff;
@@ -107,12 +109,14 @@ main::-webkit-scrollbar-thumb {
 }
 
 /* 卡片分组标题：中性灰小标题（② 色彩语义——蓝色只表示"可交互 / 单选选中"，
-   标题是结构信息不是交互入口，用灰阶做层级） */
+   标题是结构信息不是交互入口，用灰阶做层级）
+   v1.20c：11px + 1px 字距在小字号中文上笔画稀碎、发虚看不清（§15 排印——
+   字距随字号走），提到 12px、字距收到 0.5px，并压深一档灰色。 */
 .card h2 {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-dim);
-  letter-spacing: 1px;
+  letter-spacing: 0.5px;
   margin: 8px 0 0;
   /* 卡片标题就是纯文字：明确清掉可能被 UA / 原生控件样式带上的底色和圆角，
      避免在某些 Windows 高 DPI 渲染下被画成白色胶囊或带圆形凸起。 */
@@ -150,15 +154,22 @@ main::-webkit-scrollbar-thumb {
   justify-content: flex-start;
 }
 
+/* 标签列改为弹性宽度（v1.20b）：固定 190px 会把说明文字硬挤成
+   "…记住选 / 择" 这类孤儿字断行（§16 Craft）。flex-shrink 让它给
+   控件让路，但说明通常一行放得下，行高反而更矮。 */
 .k {
-  flex: 0 0 190px;
+  flex: 0 1 auto;
+  min-width: 150px;
   display: flex;
   flex-direction: column;
   gap: 3px;
 }
 
 .k > span {
-  font-size: 12.5px;
+  font-size: 13px;
+  /* §15：层级靠字重 + 字号组合——标签是每行的主信息，13px 中字重
+     压住 11px 说明文字；v1.20c 由 12.5px 提亮一档（用户反馈看不清） */
+  font-weight: 600;
   color: var(--text);
 }
 
@@ -168,6 +179,8 @@ main::-webkit-scrollbar-thumb {
   font-size: 11px;
   color: var(--text-faint);
   line-height: 1.4;
+  /* Chromium 130 支持 text-wrap: pretty：避免段尾孤儿字（"…选 / 择"） */
+  text-wrap: pretty;
 }
 
 /* 已有挂件数超过新设的上限时，把这行说明标红，提醒"只拦新增、不删已有" */
@@ -226,8 +239,17 @@ main::-webkit-scrollbar-thumb {
   background: var(--accent-soft);
 }
 
+/* §1 Response：按压即时反馈，按下即缩（不只位移） */
 .btn:active {
-  transform: translateY(1px);
+  transform: scale(0.97);
+}
+
+/* §16 Agency / Flexibility：键盘操作也要看得见焦点 */
+.btn:focus-visible,
+#limit-input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(75, 134, 245, 0.18);
 }
 
 .btn.danger {
@@ -284,10 +306,12 @@ main::-webkit-scrollbar-thumb {
   box-shadow: 0 0 0 3px rgba(75, 134, 245, 0.12);
 }
 
+/* 占用进度条：固定弹性行（§16 分组与映射——条是"当前占用"的展示，
+   跟随标签一侧即可，不再被 flex:1 拉伸挤进按钮中间） */
 .bar {
-  flex: 1;
+  flex: 0 1 200px;
   min-width: 40px;
-  height: 5px;
+  height: 6px;
   border-radius: 3px;
   background: var(--bar-bg);
   overflow: hidden;
@@ -415,14 +439,13 @@ kbd {
 
 /* ---------- 深色主题（v1.10） ----------
    与主界面同一套深灰蓝底 + 提亮蓝强调；只覆写颜色，不改任何控件尺寸。 */
-:root[data-theme="dark"] {
-  --bg: #1b1f28;
+:root[data-theme="dark"] {  --bg: #1b1f28;
   --card: #262c38;
   --card-line: #39424f;
   --line: #353d4a;
   --text: #e9eef7;
-  --text-dim: #aeb9ca;
-  --text-faint: #7d8899;
+  --text-dim: #b6c1d2;
+  --text-faint: #909bad;
   --accent: #5b93ff;
   --accent-strong: #8ab4ff;
   --accent-soft: rgba(91, 147, 255, 0.16);
@@ -435,4 +458,16 @@ kbd {
   --scroll-thumb: #495465;
   --bar-bg: #313947;
   --card-shadow: 0 2px 8px rgba(0, 0, 0, 0.34);
+}
+
+/* ---------- 减少动态（系统无障碍设置，§14） ----------
+   设置窗口的动效只有颜色过渡与按压缩放：位移类没有， transitions 全部保留
+   颜色反馈，仅去掉缩放。 */
+@media (prefers-reduced-motion: reduce) {
+  .btn:active {
+    transform: none;
+  }
+  .bar > i {
+    transition: none;
+  }
 }

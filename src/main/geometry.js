@@ -161,6 +161,30 @@ function shouldAutoHide(point, winBounds, hovering, busyDrag) {
   return !inside;
 }
 
+/**
+ * 一个轮询周期的"可见状态收回"判定（v1.20d）。
+ * 显式唤出（托盘点击 / 托盘菜单 / 二次启动）后 summonPending = true：
+ * 指针第一次进入窗口前不收回——用户点了"显示悬挂绳"，光标还停在屏幕
+ * 角落的托盘上，绳不该 180ms 后自己消失。指针来过一次后走常规离开收回。
+ * @returns {{summonPending:boolean, outsideTicks:number, hide:boolean}}
+ */
+function autoHideTick(point, winBounds, hovering, busyDrag, summonPending, outsideTicks, graceTicks) {
+  if (summonPending) {
+    const inside =
+      point.x >= winBounds.x &&
+      point.x < winBounds.x + winBounds.width &&
+      point.y >= winBounds.y &&
+      point.y < winBounds.y + winBounds.height;
+    if (inside) return { summonPending: false, outsideTicks: 0, hide: false };
+    return { summonPending: true, outsideTicks: 0, hide: false };
+  }
+  if (shouldAutoHide(point, winBounds, hovering, busyDrag)) {
+    const ticks = outsideTicks + 1;
+    return { summonPending: false, outsideTicks: ticks, hide: ticks >= graceTicks };
+  }
+  return { summonPending: false, outsideTicks: 0, hide: false };
+}
+
 module.exports = {
   WIDTH_DIVISOR,
   LENGTH_DIVISOR,
@@ -174,4 +198,5 @@ module.exports = {
   isEdgeHit,
   nextEdgeTicks,
   shouldAutoHide,
+  autoHideTick,
 };

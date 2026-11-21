@@ -1,7 +1,7 @@
 {
   "name": "hanging-rope",
   "productName": "悬挂绳",
-  "version": "1.18.0",
+  "version": "2.0.0",
   "description": "悬挂绳 —— 常驻屏幕顶端的文件中转站，拖上去挂着，用的时候拖下来。",
   "main": "src/main/main.js",
   "author": "local",

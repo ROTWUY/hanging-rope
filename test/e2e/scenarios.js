@@ -2,7 +2,7 @@
  * 悬挂绳 —— Electron 端到端场景
  *
  * 用法（由 test/run-tests.js 调用，不建议手工直接跑）：
- *   HR_SCENARIO=basic|restore|discard|shortcut|click|dedupe|dedupe-restart|theme|theme-restart|office-icons|item-limit|position|position-restart|multi-select
+ *   HR_SCENARIO=basic|restore|discard|shortcut|click|dedupe|dedupe-restart|theme|theme-restart|office-icons|item-limit|position|position-restart|multi-select|summon
  *   HANGING_ROPE_TEST_USERDATA=<临时目录>
  *
  * 说明：
@@ -242,7 +242,9 @@ async function runBasic(win) {
     );
     assert.equal(r.cardH, 104, '卡片总高保持 104px');
     assert.ok(r.thumbH > 70, '预览区应占满原本名称行腾出的空间，而不是留一块空白');
-    assert.equal(r.clamp, '6', '正文预览行数应随高度增加');
+    // v1.19：11px × 1.35 行距下 6 行放不进 86px 内容区（最后一行被削半），
+    // 收敛为 5 行 —— 仍比普通卡片默认的 4 行多，断言意图（随高度增加）不变
+    assert.equal(r.clamp, '5', '正文预览行数应随高度增加');
   });
 
   await js(win, `rope.addText(${JSON.stringify('x'.repeat(50001))})`);
@@ -435,6 +437,34 @@ async function runBasic(win) {
     assert.ok(heightExpanded >= 400, 'height=' + heightExpanded);
   });
 
+  /* AC-156：面板不遮挡触发卡片（v1.20 用户反馈——展开列表盖住了原卡片）。
+     顶部停靠优先放卡片侧面，窗口太窄两侧都放不下时落到卡片正下方并加高窗口。 */
+  await check('AC-156 面板不遮挡触发卡片', async () => {
+    const geom = await js(
+      win,
+      `(() => {
+        const el = [...document.querySelectorAll('.item')].find(
+          (n) => n.dataset.id === ${JSON.stringify(folderItemId)}
+        );
+        const p = document.querySelector('#folder-panel');
+        const r = el.getBoundingClientRect();
+        const q = p.getBoundingClientRect();
+        return JSON.stringify({
+          hidden: p.hidden,
+          overlap: !(q.left >= r.right || q.right <= r.left || q.top >= r.bottom || q.bottom <= r.top),
+          below: q.top >= r.bottom - 1,
+          side: q.top < r.bottom && (q.left >= r.right - 1 || q.right <= r.left + 1),
+          fitsH: q.bottom <= window.innerHeight + 1,
+        });
+      })()`
+    );
+    const g = JSON.parse(geom);
+    assert.equal(g.hidden, false, '面板应处于打开状态');
+    assert.equal(g.overlap, false, '面板与触发卡片不应相交');
+    assert.ok(g.below || g.side, '面板应在卡片下方或侧面 below=' + g.below + ' side=' + g.side);
+    assert.ok(g.fitsH, '面板应完整落在窗口内 bottom<=' + 'innerHeight');
+  });
+
   /* AC-17：在列表行上按住拖动 → 发起对外拖出（dry-run 只校验载荷） */
   const dragLogBeforeRow = T.dragLog.length;
   const rowTarget = await js(
@@ -458,6 +488,67 @@ async function runBasic(win) {
     assert.ok(last.target.startsWith(folderPath), '目标应位于该文件夹内：' + last.target);
     assert.notEqual(last.target, folderPath, '不应是文件夹本身');
     assert.equal(rowTarget, true);
+  });
+
+  /* --- v1.20：拖出结束后立刻能排序 ---
+     真实拖出后 ui.nativeDrag 要等 2.5s 兜底定时器才解除，期间 pointerdown
+     全被拒绝——用户把文件拖回来想马上排序，体感就是"没法排序了"。
+     修复后主进程在拖放结束时发 drag-ended 事件，渲染层立刻解除。 */
+  await check('AC-154 拖出结束（drag-ended 事件）后 nativeDrag 立即解除、可立即排序', async () => {
+    // 发起一次 dry 拖出（文件挂件手势：抬起 → 越过窗口底边）
+    const out = await js(
+      win,
+      `(async () => {
+        const el = document.querySelector('.item:not(.t-text)');
+        const r = el.getBoundingClientRect();
+        const mk = (x, y) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 20, pointerType: 'mouse', isPrimary: true });
+        el.dispatchEvent(new PointerEvent('pointerdown', mk(r.left + 20, r.top + 20)));
+        await new Promise((resolve) => { const t0 = Date.now(); const tick = () => { if (ui.reorder || Date.now() - t0 > 2000) return resolve(); setTimeout(tick, 25); }; tick(); });
+        document.dispatchEvent(new PointerEvent('pointermove', mk(r.left + 20, window.innerHeight - 2)));
+        await new Promise((res) => setTimeout(res, 80));
+        return { nativeDrag: ui.nativeDrag };
+      })()`
+    );
+    assert.equal(out.nativeDrag, true, '拖出时 nativeDrag 应置位');
+    // dry 拖出 300ms 后主进程发 drag-ended；等它到达
+    await waitFor('drag-ended 到达', () => js(win, 'ui.nativeDrag === false'), 3000);
+    const press = await js(
+      win,
+      `(async () => {
+        const el = document.querySelector('.item:not(.t-text)');
+        const r = el.getBoundingClientRect();
+        const mk = (x, y) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 21, pointerType: 'mouse', isPrimary: true });
+        el.dispatchEvent(new PointerEvent('pointerdown', mk(r.left + 20, r.top + 20)));
+        const ok = !!ui.press;
+        document.dispatchEvent(new PointerEvent('pointerup', mk(r.left + 20, r.top + 20)));
+        return { ok };
+      })()`
+    );
+    assert.equal(press.ok, true, '拖放结束后 pointerdown 应立即被受理');
+    await sleep(300);
+  });
+
+  await check('AC-155 手势残留自愈：卡死的 press/reorder 不再拒绝新的排序按下', async () => {
+    const healed = await js(
+      win,
+      `(async () => {
+        // 伪造残留手势（模拟 pointerup/cancel 被系统拖拽吞掉）
+        ui.press = { timer: 0, lifted: true, pointerId: 99 };
+        ui.reorder = { el: document.querySelector('.item'), item: { id: 'x', type: 'file' } };
+        document.querySelector('.item').classList.add('lifting');
+        const el = document.querySelector('.item:not(.t-text)');
+        const r = el.getBoundingClientRect();
+        const mk = (x, y) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 22, pointerType: 'mouse', isPrimary: true });
+        el.dispatchEvent(new PointerEvent('pointerdown', mk(r.left + 20, r.top + 20)));
+        const pressAccepted = !!ui.press && ui.press.pointerId === 22;
+        const staleCleared = !document.querySelector('.item.lifting');
+        document.dispatchEvent(new PointerEvent('pointerup', mk(r.left + 20, r.top + 20)));
+        return { pressAccepted, staleCleared };
+      })()`
+    );
+    assert.equal(healed.pressAccepted, true, '新手势应被受理');
+    assert.equal(healed.staleCleared, true, '残留 lifting 应被清理');
+    await sleep(300);
   });
 
   /* 计数基线紧贴滚轮前取：中间若有重渲染（拖出会刷新列表）会让旧快照失效，
@@ -844,6 +935,79 @@ async function runBasic(win) {
     );
   });
 
+  /* --- 拖拽排序的边缘自动滚动（v1.20） ---
+     把挂件往绳的可视区边缘外拖（如把最右的挂件拖去最左）时，
+     绳索应按指针深入边缘感应区的程度自动滚动，否则末端的槽位永远够不到。
+     溢出量不够就先加文字挂件凑，测完按 id 清掉并还原顺序。 */
+  const overflowBefore = await js(win, 'els.track.scrollWidth - els.track.clientWidth');
+  const idsBeforeEdge = await js(win, 'rope.getState().then(s => s.items.map(i => i.id))');
+  if (overflowBefore < 320) {
+    await js(
+      win,
+      `(async () => {
+        for (let i = 0; i < 15 && els.track.scrollWidth - els.track.clientWidth < 320; i++) {
+          rope.addText('边缘自动滚动占位 ' + i);
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        return true;
+      })()`
+    );
+    await sleep(300);
+  }
+  const edge = await js(
+    win,
+    `(async () => {
+      const t = els.track;
+      t.scrollLeft = t.scrollWidth;
+      const el = t.querySelector('.item:not(.t-text)');
+      if (!el) return { skip: true };
+      const r = el.getBoundingClientRect();
+      const mk = (x, y) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true });
+      const startY = r.top + 20;
+      el.dispatchEvent(new PointerEvent('pointerdown', mk(r.left + 20, startY)));
+      // 等抬起（LIFT_MS=150，忙时可能推迟，条件等待）
+      await new Promise((resolve) => {
+        const t0 = Date.now();
+        const tick = () => {
+          if (ui.reorder || Date.now() - t0 > 2000) return resolve();
+          setTimeout(tick, 25);
+        };
+        tick();
+      });
+      if (!ui.reorder) return { skip: true, noLift: true };
+      const rect = t.getBoundingClientRect();
+      // 指针移进左边缘感应区（10px）后停住，只采样 scrollLeft
+      document.dispatchEvent(new PointerEvent('pointermove', mk(rect.left + 10, startY)));
+      const samples = [];
+      for (let i = 0; i < 10; i++) {
+        await new Promise((res) => setTimeout(res, 120));
+        samples.push(Math.round(t.scrollLeft));
+      }
+      const duringDrag = { start: Math.round(t.scrollWidth - t.clientWidth), end: samples[samples.length - 1] };
+      document.dispatchEvent(new PointerEvent('pointerup', mk(rect.left + 10, startY)));
+      await new Promise((res) => setTimeout(res, 350));
+      const idx = [...t.querySelectorAll('.item')].indexOf(el);
+      return { duringDrag, samples, after: { left: Math.round(t.scrollLeft), raf: edgeScroll.raf, reordering: !!ui.reorder, idx } };
+    })()`
+  );
+  await check('AC-152 拖到绳左边缘时自动滚动到头（末端槽位够得到）', () => {
+    if (edge.skip) return assert.ok(!edge.noLift, '抬起失败：' + JSON.stringify(edge));
+    assert.ok(edge.duringDrag.start > 0, '应存在溢出');
+    assert.equal(edge.duringDrag.end, 0, '停住不动也应滚到 0：' + JSON.stringify(edge.duringDrag));
+  });
+  await check('AC-153 松手后自动滚动停止，挂件落到最左槽位', () => {
+    assert.equal(edge.after.raf, 0, 'rAF 循环应停止');
+    assert.equal(edge.after.reordering, false, '排序手势应结束');
+    assert.equal(edge.after.idx, 0, '被拖挂件应排到最前：idx=' + edge.after.idx);
+  });
+  // 清理：删掉占位挂件、还原顺序
+  const idsAfterEdge = await js(win, 'rope.getState().then(s => s.items.map(i => i.id))');
+  const addedEdge = idsAfterEdge.filter((id) => !idsBeforeEdge.includes(id));
+  for (const id of addedEdge) await js(win, `rope.removeItem(${JSON.stringify(id)})`);
+  await js(win, `rope.reorder(${JSON.stringify(idsBeforeEdge)})`);
+  await js(win, 'els.track.scrollLeft = 0');
+  await sleep(400);
+
   /* --- 取件模式 --- */
   await js(win, `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`);
   await sleep(200);
@@ -973,20 +1137,33 @@ async function runBasic(win) {
   });
 
   /* --- 轨道横向滚动 --- */
+  // v1.19 起滚轮是平滑滚动（rAF 逐帧收敛到累积目标），不再逐格瞬跳：
+  // 断言前先等 scrollLeft 停稳，再以停稳值作为下一步的基线
+  const settledLeft = async () => {
+    let prev = await js(win, 'document.querySelector("#track").scrollLeft');
+    for (;;) {
+      await sleep(160);
+      const cur = await js(win, 'document.querySelector("#track").scrollLeft');
+      if (cur === prev) return cur;
+      prev = cur;
+    }
+  };
   await js(win, `(() => { for (let i = 0; i < 8; i++) rope.addText('轨道滚动测试-' + i); return true; })()`);
   await waitFor('轨道溢出', async () => {
     return js(win, '(() => { const t=document.querySelector("#track"); return t.scrollWidth - t.clientWidth > 0; })()');
   });
   await check('F3 挂件超出宽度时轨道可横向滚动', async () => {
-    const left = await js(
+    await js(
       win,
-      `(() => { const t=document.querySelector('#track'); t.dispatchEvent(new WheelEvent('wheel',{deltaY:200,bubbles:true,cancelable:true})); return t.scrollLeft; })()`
+      `(() => { const t=document.querySelector('#track'); t.dispatchEvent(new WheelEvent('wheel',{deltaY:200,bubbles:true,cancelable:true})); return true; })()`
     );
+    const left = await settledLeft();
     assert.ok(left > 0, 'scrollLeft 应大于 0，实际 ' + left);
   });
 
   /* AC-39：鼠标不在挂件上、而在绳索条底部的背景空白处，滚轮同样能横向滚动 */
-  const bgScroll = await js(
+  const bgBefore = await settledLeft();
+  await js(
     win,
     `(() => {
       const t = document.querySelector('#track');
@@ -996,25 +1173,29 @@ async function runBasic(win) {
       const el = document.elementFromPoint(x, y) || document.querySelector('#shell');
       const where = (el.id || el.className || el.tagName) + '';
       el.dispatchEvent(new WheelEvent('wheel', { deltaY: 200, bubbles: true, cancelable: true }));
-      return { after: t.scrollLeft, where };
+      return { where };
     })()`
   );
-  await check('AC-39 在挂件下方的背景空白处滚轮 = 横向滚动', () => {
-    assert.ok(bgScroll.after > 0, `scrollLeft 应 > 0，实际 ${bgScroll.after}（落点 ${bgScroll.where}）`);
+  await check('AC-39 在挂件下方的背景空白处滚轮 = 横向滚动', async () => {
+    const left = await settledLeft();
+    assert.ok(left > 0, `scrollLeft 应 > 0，实际 ${left}（平滑滚动应已到位）`);
   });
 
-  const bgScrollUp = await js(
+  const bgScrollUp = { before: await settledLeft() };
+  await js(
     win,
     `(() => {
       const t = document.querySelector('#track');
       const el = document.querySelector('#shell');
-      const before = t.scrollLeft;
       el.dispatchEvent(new WheelEvent('wheel', { deltaY: -120, bubbles: true, cancelable: true }));
-      return { before, after: t.scrollLeft };
+      return true;
     })()`
   );
-  await check('AC-39 反向滚轮往回滚', () => {
-    assert.ok(bgScrollUp.after < bgScrollUp.before, `${bgScrollUp.before} → ${bgScrollUp.after}`);
+  await check('AC-39 反向滚轮往回滚', async () => {
+    const after = await waitFor('scrollLeft 回落', () =>
+      js(win, `(() => { const t = document.querySelector('#track'); return t.scrollLeft < ${bgScrollUp.before} ? t.scrollLeft : false; })()`)
+    );
+    assert.ok(after < bgScrollUp.before, `${bgScrollUp.before} → ${after}`);
   });
 
   /* AC-39 后半：文件夹面板上的滚轮只翻列表，不横向滚动绳索 */
@@ -1499,6 +1680,14 @@ async function runItemLimit(win) {
     );
     const bg = await js(sw, `getComputedStyle(document.querySelector('.limit-opt.on')).backgroundColor`);
     assert.equal(bg, 'rgb(91, 147, 255)', '深色下选中档位应仍是蓝色实心');
+  });
+
+  await check('AC-161 「关于」卡片显示版本号，与 app.getVersion() 一致', async () => {
+    const h2s = await js(sw, "[...document.querySelectorAll('.card h2')].map(h => h.textContent)");
+    assert.ok(h2s.includes('关于'), '应存在「关于」分组：' + h2s.join(','));
+    const ver = await js(sw, "document.querySelector('#app-version').textContent");
+    assert.match(ver, /^\d+\.\d+\.\d+$/, '版本号应为 x.y.z 格式：' + ver);
+    assert.equal(ver, app.getVersion(), '渲染层显示应与主进程 app.getVersion() 一致');
   });
 
   await check('AC-36 本场景无渲染进程崩溃记录', () => {
@@ -2301,7 +2490,8 @@ async function runTheme(win) {
   });
 
   await check('AC-95 卡片是实色不透明底，标题是纯文字、控件不套原生外观（无白色胶囊/圆形凸起）', () => {
-    assert.equal(layout.cards.length, 3);
+    // v2.0.0：外观 / 图片缓存 / 悬挂绳 / 关于 —— 4 张卡片
+    assert.equal(layout.cards.length, 4);
     for (const bg of layout.cards) {
       assert.equal(bg, 'rgb(255, 255, 255)', '浅色卡片应是纯白实底');
     }
@@ -2504,7 +2694,7 @@ async function runPosition(win) {
   const setPos = async (pos) => {
     await js(win, `rope.setSettings({ ropePosition: ${JSON.stringify(pos)} }); true`);
     await waitFor('停靠位置 = ' + pos, () => T.settingsSnapshot().settings.ropePosition === pos);
-    await sleep(260); // 等滑入动画结束
+    await sleep(450); // 等滑入弹簧收敛（v1.19：easeOut 换弹簧，收敛 ≈ 250~350ms）
   };
   const dataPos = () => js(win, 'document.documentElement.getAttribute("data-pos")');
 
@@ -2530,9 +2720,12 @@ async function runPosition(win) {
   // 等入场动画（hang-in 的 transform 会临时改变 getBoundingClientRect）
   await waitFor('入场动画结束', () => js(win, 'document.querySelectorAll(".item.anim-in").length === 0'), 4000);
   await sleep(120);
+  // 用 offsetTop/offsetLeft（布局位置）而不是 getBoundingClientRect：
+  // 后者含 transform，真实光标恰好悬在某张卡片上时 :hover 的 translateY(-3px)
+  // 会让 y 差 3px——这是环境干扰，不是布局错误。
   const rectsH = await js(
     win,
-    `JSON.stringify([...document.querySelectorAll('.item')].map((n) => { const r = n.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y) }; }))`
+    `JSON.stringify([...document.querySelectorAll('.item')].map((n) => ({ x: Math.round(n.offsetLeft), y: Math.round(n.offsetTop) })))`
   );
   const hArr = JSON.parse(rectsH);
   await check('AC-119 顶部：挂件横向排列（x 递增、y 相同）', () => {
@@ -2635,7 +2828,7 @@ async function runPosition(win) {
     await sleep(200);
     await js(sw, `document.querySelector('.pos-opt[data-pos-value="left"]').click(); true`);
     await waitFor('设置切到 left', () => T.settingsSnapshot().settings.ropePosition === 'left');
-    await sleep(300);
+    await sleep(500); // 等滑入弹簧收敛
     assert.ok(Math.abs(B().x - work.x) <= 1, '主窗口应已贴左，x=' + B().x);
     const on = await js(
       sw,
@@ -3015,6 +3208,57 @@ async function runMultiSelect(win) {
   });
 }
 
+/* ---------------- v1.20d：显式唤出不被自动收回吞掉（summon） ----------------
+   托盘"显示悬挂绳"点击时光标必然停在屏幕角落的托盘上——不在绳窗口内。
+   修复前可见状态的离开判定 3 个轮询周期（约 180ms）就收回，绳"闪一下就没"。
+   修复后显式唤出要等指针进入过窗口一次才开始常规收回判定。
+   本场景轮询被冻结，用 __test.edgeWatchTick(注入坐标) 精确驱动每一拍。 */
+async function runSummon(win) {
+  const WA = screen.getPrimaryDisplay().workArea;
+  const snap = () => T.snapshot();
+  const tick = (p) => T.edgeWatchTick(p);
+  // 托盘方向：工作区左下角（不在绳窗口内，也不在停靠热区上）
+  const outside = () => ({ x: WA.x + 6, y: WA.y + WA.height - 6 });
+  const inside = () => {
+    const b = T.getWindow().getBounds();
+    return { x: b.x + Math.floor(b.width / 2), y: b.y + Math.floor(b.height / 2) };
+  };
+
+  T.hideRope(true);
+  await sleep(350); // 等收回弹簧收敛
+
+  await check('AC-157 显式唤出（托盘语义）后指针没到窗口，绳持续可见', () => {
+    T.showRope({ explicit: true });
+    for (let i = 0; i < 20; i++) tick(outside());
+    assert.equal(snap().ropeVisible, true, '20 拍（≈1.2s）后仍应可见');
+  });
+
+  await check('AC-158 显式唤出后指针来过一次，离开再走常规宽限收回', async () => {
+    await sleep(400); // 等唤出弹簧收敛到 shown 边界，inside() 才落在真实窗口内
+    tick(inside());
+    tick(outside());
+    tick(outside());
+    assert.equal(snap().ropeVisible, true, '宽限期内仍在');
+    tick(outside());
+    assert.equal(snap().ropeVisible, false, '第 3 拍应收回');
+  });
+
+  await check('AC-159 非显式唤出保持原节奏：离开 3 拍即收回', () => {
+    T.showRope();
+    assert.equal(snap().ropeVisible, true);
+    tick(outside());
+    tick(outside());
+    assert.equal(snap().ropeVisible, true, '宽限期内仍在');
+    tick(outside());
+    assert.equal(snap().ropeVisible, false);
+  });
+
+  await check('AC-160 本场景无渲染进程崩溃记录', () => {
+    const crash = path.join(userData, 'crash.log');
+    assert.ok(!fs.existsSync(crash), fs.existsSync(crash) ? fs.readFileSync(crash, 'utf8') : '');
+  });
+}
+
 
   console.log(`\n[e2e] 场景：${scenario}`);
 
@@ -3032,6 +3276,7 @@ async function runMultiSelect(win) {
   else if (scenario === 'position') await runPosition(win);
   else if (scenario === 'position-restart') await runPositionRestart(win);
   else if (scenario === 'multi-select') await runMultiSelect(win);
+  else if (scenario === 'summon') await runSummon(win);
   else throw new Error('未知场景：' + scenario);
 
   console.log(`[e2e] ${scenario}: ${passes} 通过 / ${failures} 失败`);

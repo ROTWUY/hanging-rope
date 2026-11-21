@@ -22,6 +22,7 @@ const els = {
   limitNote: $('#limit-note'),
   limitOpts: Array.from(document.querySelectorAll('.limit-opt')),
   posOpts: Array.from(document.querySelectorAll('.pos-opt')),
+  version: $('#app-version'),
   posNote: $('#pos-note'),
   themeLight: $('#btn-theme-light'),
   themeDark: $('#btn-theme-dark'),
@@ -157,6 +158,9 @@ async function refresh() {
 
   els.copyState.textContent = info.copyMode ? '已开启' : '已关闭';
   els.copyState.classList.toggle('on', !!info.copyMode);
+
+  // 「关于」卡片：版本号由主进程 app.getVersion() 提供（v2.0.0）
+  els.version.textContent = info.version || '—';
 
   const count = info.itemCount;
   els.itemCount.textContent = `当前 ${count} 件 / 上限 ${lim} 件`;

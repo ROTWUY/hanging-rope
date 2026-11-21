@@ -71,6 +71,7 @@ let animToken = 0; // 动画令牌：新动画打断旧动画
 let busyDrag = false; // 拖拽进行中禁止收回
 let hovering = false; // 渲染层报告鼠标在内容上
 let removeMode = false;
+let summonPending = false; // 显式唤出（托盘等）后待指针首次进入窗口（v1.20d）
 
 /* 剪贴板监听 */
 let copyMode = false;
@@ -93,7 +94,7 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => showRope());
+  app.on('second-instance', () => showRope({ explicit: true }));
 }
 
 app.setAppUserModelId('com.local.hangingrope');
@@ -153,33 +154,68 @@ function computeRopeGeometry() {
   return geo.computeRopeBounds(display.bounds, display.workArea, ropeThickness, ropePos);
 }
 
-/* 从当前 bounds 平滑滑到目标 bounds（x/y 只有一个轴在动，另一个保持不动） */
+/* 从当前 bounds 弹簧滑到目标 bounds（§3/§4：临界阻尼弹簧，无回弹）。
+   v1.19 之前是固定 150ms easeOutCubic —— 中途反向时缓动从头重启，
+   速度先骤停再加速，有"撞墙感"；弹簧跨 re-target 连续：
+   x / y 各自独立积分（§3 二维运动拆两个一维弹簧），速度保存在模块级，
+   新目标从当前值 + 当前速度继续，中断天然平滑。步进用真实 dt 的
+   半隐式欧拉，收敛（距离 < 0.5px 且速度 < 8px/s）后贴齐并清零速度。 */
+const SPRING_RESPONSE = 0.15; // 秒：越小越"跟手"（0.15 ≈ 旧版 150ms easeOut 的节奏）
+const SPRING_DAMPING = 1.0; // 1.0 = 临界阻尼（§4：默认 UI 不回弹）
+let animVel = { x: 0, y: 0 };
+
 function animateBounds(target, done) {
   const token = ++animToken;
-  const from = win.getBounds();
-  const dur = 150;
-  const start = Date.now();
+  const b = win.getBounds();
+  const pos = { x: b.x, y: b.y };
+  const tgt = { x: target.x, y: target.y };
+  const vel = { ...animVel };
+  const k = Math.pow((2 * Math.PI) / SPRING_RESPONSE, 2); // 刚度（质量 = 1）
+  const c = 2 * SPRING_DAMPING * Math.sqrt(k); // 阻尼系数
+  let last = Date.now();
   const step = () => {
     if (!win || token !== animToken) return;
-    const t = Math.min(1, (Date.now() - start) / dur);
-    const e = 1 - Math.pow(1 - t, 3); // easeOutCubic
-    const x = Math.round(from.x + (target.x - from.x) * e);
-    const y = Math.round(from.y + (target.y - from.y) * e);
+    const now = Date.now();
+    const dt = Math.min(0.032, Math.max(0.004, (now - last) / 1000));
+    last = now;
+    vel.x += (-k * (pos.x - tgt.x) - c * vel.x) * dt;
+    vel.y += (-k * (pos.y - tgt.y) - c * vel.y) * dt;
+    pos.x += vel.x * dt;
+    pos.y += vel.y * dt;
+    const settled =
+      Math.abs(pos.x - tgt.x) < 0.5 &&
+      Math.abs(pos.y - tgt.y) < 0.5 &&
+      Math.abs(vel.x) < 8 &&
+      Math.abs(vel.y) < 8;
+    if (settled) {
+      pos.x = tgt.x;
+      pos.y = tgt.y;
+      vel.x = 0;
+      vel.y = 0;
+    }
+    animVel = { x: vel.x, y: vel.y };
     try {
-      win.setBounds({ x, y, width: target.width, height: target.height });
+      win.setBounds({ x: Math.round(pos.x), y: Math.round(pos.y), width: target.width, height: target.height });
     } catch {
       /* ignore */
     }
-    if (t < 1) setTimeout(step, 12);
-    else if (done) done();
+    if (settled) {
+      if (done) done();
+      return;
+    }
+    setTimeout(step, 8);
   };
   step();
 }
 
-function showRope() {
+function showRope(opts) {
   if (!win || ropeVisible) return;
   ropeVisible = true;
   outsideTicks = 0;
+  /* 显式唤出（托盘点击 / 托盘菜单 / 二次启动）：等指针来过窗口一次才开始
+     自动收回判定。否则点击"显示悬挂绳"时光标还在屏幕角落的托盘上，
+     3 个轮询周期（约 180ms）后绳就被"离开收回"吞掉——闪一下就没（v1.20d）。 */
+  summonPending = !!(opts && opts.explicit);
   ropeGeom = computeRopeGeometry(); // 厚度可能刚被文件夹面板改过
   animateBounds(ropeGeom.shown);
   sendEvent({ type: 'shown' });
@@ -189,6 +225,7 @@ function hideRope(force = false) {
   if (!win || !ropeVisible) return;
   if (busyDrag && !force) return;
   ropeVisible = false;
+  summonPending = false;
   removeMode = false;
   clearTimeout(escReleaseTimer);
   unregisterHoverShortcuts();
@@ -199,32 +236,32 @@ function hideRope(force = false) {
 /* 鼠标轮询：贴当前停靠边唤出；离开窗口一段时间后收回 */
 let edgeTicks = 0; // 屏幕边缘连续停留计数（防误触：掠过不唤出）
 
+/* 单个轮询周期。injectedPoint 仅测试用（冻结轮询时由用例直接驱动）。 */
+function edgeWatchTick(injectedPoint) {
+  if (!win || !ropeGeom) return;
+  const p = injectedPoint || screen.getCursorScreenPoint();
+  const display = screen.getPrimaryDisplay();
+
+  if (!ropeVisible) {
+    const hit = geo.isEdgeHit(p, display.bounds, display.workArea, ropeGeom.shown, ropePos, EDGE_TRIGGER_PX);
+    const step = geo.nextEdgeTicks(edgeTicks, hit, 2);
+    edgeTicks = step.ticks;
+    if (step.show) showRope();
+    return;
+  }
+
+  // 可见状态：判断是否离开
+  if (process.env.HANGING_ROPE_DEBUG_SHOW) return; // 调试常显
+  const r = geo.autoHideTick(p, win.getBounds(), hovering, busyDrag, summonPending, outsideTicks, HIDE_GRACE_TICKS);
+  summonPending = r.summonPending;
+  outsideTicks = r.outsideTicks;
+  if (r.hide) hideRope();
+}
+
 function startEdgeWatcher() {
-  // 测试用：冻结轮询，由测试脚本显式调用 showRope/hideRope，避免真实光标位置干扰
+  // 测试用：冻结轮询，由测试脚本显式调用 showRope/hideRope/edgeWatchTick，避免真实光标位置干扰
   if (process.env.HANGING_ROPE_TEST_FREEZE_WATCHER) return;
-  setInterval(() => {
-    if (!win || !ropeGeom) return;
-    const p = screen.getCursorScreenPoint();
-    const display = screen.getPrimaryDisplay();
-
-    if (!ropeVisible) {
-      const hit = geo.isEdgeHit(p, display.bounds, display.workArea, ropeGeom.shown, ropePos, EDGE_TRIGGER_PX);
-      const step = geo.nextEdgeTicks(edgeTicks, hit, 2);
-      edgeTicks = step.ticks;
-      if (step.show) showRope();
-      return;
-    }
-
-    // 可见状态：判断是否离开
-    if (process.env.HANGING_ROPE_DEBUG_SHOW) return; // 调试常显
-    const b = win.getBounds();
-    if (geo.shouldAutoHide(p, b, hovering, busyDrag)) {
-      outsideTicks++;
-      if (outsideTicks >= HIDE_GRACE_TICKS) hideRope();
-    } else {
-      outsideTicks = 0;
-    }
-  }, POLL_MS);
+  setInterval(() => edgeWatchTick(), POLL_MS);
 }
 
 /* ---------------- Escape 取件模式 ----------------
@@ -1047,6 +1084,7 @@ function startDrag(payload, sender) {
   }
   if (!plan.ok) {
     if (!plan.warning) sendEvent({ type: 'toast', text: '无法拖出', level: 'warn' });
+    sendEvent({ type: 'drag-ended' }); // 渲染层已先置位 nativeDrag，失败路径立刻解除
     return false;
   }
 
@@ -1058,6 +1096,7 @@ function startDrag(payload, sender) {
     dragLog.push({ at: Date.now(), target: plan.target, kind: plan.kind, warning: plan.warning });
     setTimeout(() => {
       busyDrag = false;
+      sendEvent({ type: 'drag-ended' }); // 干跑也走同一事件，测试与真实路径一致
     }, 300);
     return true;
   }
@@ -1067,9 +1106,14 @@ function startDrag(payload, sender) {
     busyDrag = false;
     logLine('startDrag error: ' + e.message);
     sendEvent({ type: 'toast', text: '拖出失败：' + e.message, level: 'warn' });
+    sendEvent({ type: 'drag-ended' });
     return false;
   }
-  // Windows 上 startDrag 会阻塞到拖放结束；这里再兜底释放，避免窗口被永久“占用”
+  // 拖放已结束（Windows 上 startDrag 阻塞到 drop 完成）：
+  // 立刻通知渲染层解除 ui.nativeDrag —— 用户把文件拖回来想马上排序时，
+  // 不能再被 2.5s 保护窗把 pointerdown 全部拒掉（v1.20 修复）。
+  sendEvent({ type: 'drag-ended' });
+  // 这里再兜底释放，避免窗口被永久“占用”
   setTimeout(() => {
     busyDrag = false;
   }, 800);
@@ -1097,6 +1141,7 @@ function startMultiDrag(list, sender) {
   }
   if (!plan.ok) {
     if (!plan.skipped) sendEvent({ type: 'toast', text: '选中的对象都无法插入', level: 'warn' });
+    sendEvent({ type: 'drag-ended' }); // 渲染层已先置位 nativeDrag，失败路径立刻解除
     return false;
   }
 
@@ -1108,6 +1153,7 @@ function startMultiDrag(list, sender) {
     dragLog.push({ at: Date.now(), target: plan.targets, kind: 'multi', warning: '', skipped: plan.skipped });
     setTimeout(() => {
       busyDrag = false;
+      sendEvent({ type: 'drag-ended' });
     }, 300);
     return true;
   }
@@ -1117,8 +1163,11 @@ function startMultiDrag(list, sender) {
     busyDrag = false;
     logLine('startDrag(multi) error: ' + e.message);
     sendEvent({ type: 'toast', text: '拖出失败：' + e.message, level: 'warn' });
+    sendEvent({ type: 'drag-ended' });
     return false;
   }
+  // 同单件拖出：拖放结束立刻通知渲染层解除 nativeDrag（v1.20 修复）
+  sendEvent({ type: 'drag-ended' });
   setTimeout(() => {
     busyDrag = false;
   }, 800);
@@ -1181,11 +1230,10 @@ function openSettingsWindow() {
 
   const area = screen.getPrimaryDisplay().workArea;
   const width = 620;
-  /* 三张卡片（外观 / 图片缓存 / 悬挂绳）加上头部与底部操作栏，v1.14 新增「停靠位置」
-     一行后内容自然高度约 730 DIP。旧值 700 会把最后一张卡片挤进滚动区，
-     高 DPI 或系统字体偏大时底部「退出程序 / 关闭」还会被窗口边缘裁掉。
-     这里给足高度并按工作区兜底，小屏幕也不会把窗口顶出屏幕。 */
-  const height = Math.min(780, Math.max(560, area.height - 40));
+  /* 四张卡片（外观 / 图片缓存 / 悬挂绳 / 关于）加上头部与底部操作栏，内容自然
+     高度约 790 DIP（v2.0.0 新增「关于」卡片后再加 60）。这里给足高度并按
+     工作区兜底，小屏幕也不会把窗口顶出屏幕（AC-94 / AC-116 一屏约束）。 */
+  const height = Math.min(830, Math.max(560, area.height - 40));
   settingsWin = new BrowserWindow({
     width,
     height,
@@ -1238,13 +1286,14 @@ function notifySettings() {
   settingsWin.webContents.send('settings:changed');
 }
 
-/* 设置窗口需要的全部数据：设置项 + 缓存占用 + 挂件数 */
+/* 设置窗口需要的全部数据：设置项 + 缓存占用 + 挂件数 + 应用版本（v2.0.0「关于」卡片） */
 function settingsSnapshot() {
   return {
     settings: store.getSettings(),
     usage: store.cacheUsage(),
     itemCount: store.getItems().length,
     copyMode,
+    version: app.getVersion(),
   };
 }
 
@@ -1270,7 +1319,7 @@ const POS_LABELS = { top: '顶部', left: '左侧', right: '右侧', bottom: '�
 
 function buildTrayTemplate() {
   return [
-    { label: '显示悬挂绳', click: () => showRope() },
+    { label: '显示悬挂绳', click: () => showRope({ explicit: true }) },
     { label: '设置', click: () => openSettingsWindow() },
     {
       label: '停靠位置',
@@ -1297,7 +1346,7 @@ function createTray() {
   tray = new Tray(icon);
   tray.setContextMenu(Menu.buildFromTemplate(buildTrayTemplate()));
   tray.setToolTip('悬挂绳');
-  tray.on('click', () => showRope());
+  tray.on('click', () => showRope({ explicit: true }));
 }
 
 /* 停靠位置变化后重建菜单，让单选勾随实际状态走 */
@@ -1620,6 +1669,7 @@ if (process.env.HANGING_ROPE_TEST_USERDATA) {
   module.exports.__test = {
     showRope,
     hideRope,
+    edgeWatchTick,
     onPastePressed,
     addPaths,
     addTextItem,

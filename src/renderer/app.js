@@ -207,15 +207,14 @@ function markClickBlocked(ms) {
   ui.suppressClickUntil = Math.max(ui.suppressClickUntil, Date.now() + ms);
 }
 
+/* 手势互斥（不含点击抑制窗）：多选勾选要用它 —— 勾选不该被
+   suppressClickUntil 拦（否则 400ms 内连选第二件会被静默吞掉，v1.19 修复） */
+function gestureBusy() {
+  return ui.removeMode || ui.nativeDrag || ui.press || ui.reorder || ui.textDrag;
+}
+
 function clickBlocked() {
-  return (
-    ui.removeMode ||
-    ui.nativeDrag ||
-    ui.press ||
-    ui.reorder ||
-    ui.textDrag ||
-    Date.now() < ui.suppressClickUntil
-  );
+  return gestureBusy() || Date.now() < ui.suppressClickUntil;
 }
 
 function targetOfItem(item) {
@@ -423,9 +422,14 @@ function wireItem(el, item) {
       if (pointInTrack(e.clientX, e.clientY, 0)) {
         reorderAtPoint(e.clientX, e.clientY, el);
         td.reordered = true;
+        // 记录指针位置并尝试启动边缘自动滚动（拖到绳两端够不到时用）
+        edgeScroll.x = e.clientX;
+        edgeScroll.y = e.clientY;
+        edgeAutoScrollStart();
       }
     });
     el.addEventListener('dragend', () => {
+      edgeAutoScrollStop();
       if (ui.textDrag && ui.textDrag.el === el && ui.textDrag.reordered) {
         commitReorder(); // 在绳内移动过 → 提交排序；拖到外部则本身就是拖出
       }
@@ -436,7 +440,15 @@ function wireItem(el, item) {
   } else {
     /* --- 文件 / 文件夹 / 图片：纯指针手势 --- */
     el.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0 || ui.nativeDrag || ui.reorder || ui.press) return;
+      if (e.button !== 0 || ui.nativeDrag) return;
+      // 手势残留自愈（v1.20）：系统原生拖拽会吞掉 pointerup/pointercancel，
+      // 若上一个手势的收尾事件丢了（新按下的 pointerId 不同 = 旧指针已消失），
+      // 先就地清掉残留再受理新手势 —— 绝不把"排序"永久拒之门外。
+      if (ui.press) {
+        clearTimeout(ui.press.timer);
+        ui.press = null;
+      }
+      if (ui.reorder) commitReorder();
       const p = {
         item,
         el,
@@ -446,6 +458,13 @@ function wireItem(el, item) {
         lifted: false,
         timer: null,
       };
+      // 记住"抓取点"在卡片内的相对位置（§2 直接操纵：拖动 1:1 跟手时，
+      // 卡片要保持被抓住的那个部位贴着指针，而不是吸附到自身中心）
+      {
+        const r = el.getBoundingClientRect();
+        p.grabDX = e.clientX - r.left;
+        p.grabDY = e.clientY - r.top;
+      }
       // 按下立即捕获指针：即使 150ms 内已经把鼠标甩出窗口，
       // 抬起后也能继续收到轨迹并正确转成拖出
       try {
@@ -498,10 +517,11 @@ function wireItem(el, item) {
       return;
     }
     if (ui.selMode) {
-      // 多选模式：单击就是勾选/取消勾选，不再复制
-      if (e.detail >= 2 || clickBlocked()) return;
+      // 多选模式：单击就是勾选/取消勾选，不再复制。
+      // 只拦手势互斥，不拦点击抑制窗：快速连选第二件不能被静默吞掉（v1.19）。
+      // 双击的第二下由 detail >= 2 挡掉（多选下 dblclick 本身已停用）。
+      if (e.detail >= 2 || gestureBusy()) return;
       toggleSelect(item.id);
-      markClickBlocked(400); // 连点会形成双击，统一拦在勾选语义外
       return;
     }
     if (e.detail >= 2 || clickBlocked()) return;
@@ -572,8 +592,109 @@ function pointInTrack(x, y, margin) {
   return x >= r.left - margin && x <= r.right + margin && y >= r.top - margin && y <= r.bottom + margin;
 }
 
-function reorderAtPoint(x, y, dragged) {
-  // 多选整组拖动时，插入位置只在“组外”的挂件里找（v1.16）
+/* ---------------- v1.19 动效基建（§2 / §3 / §14） ----------------
+   · FLIP：被让位的卡片从旧视觉位置弹回新槽位，中断时从当前 transform
+     续算（§3 永远从"看到的值"出发），水平 / 垂直停靠都成立；
+   · 跟手：拖动锚点卡片 1:1 跟随指针，槽位变化后即时补偿 transform；
+   · reduced-motion 两者都退化为瞬时换位。 */
+const REDUCED_MOTION = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function currentTranslate(el) {
+  const t = getComputedStyle(el).transform;
+  if (!t || t === 'none') return [0, 0];
+  const m = t.match(/^matrix\((.+)\)$/);
+  if (!m) return [0, 0];
+  const p = m[1].split(',').map(parseFloat);
+  return [p[4] || 0, p[5] || 0];
+}
+
+function flipApply(snapshot, skipSet) {
+  if (REDUCED_MOTION()) return;
+  for (const [el, old] of snapshot) {
+    if (skipSet && skipSet.has(el)) continue;
+    const now = el.getBoundingClientRect();
+    const [tx, ty] = currentTranslate(el);
+    // 视觉连续：新 transform = 旧视觉位置 - 新布局位置
+    const dx = old.left + tx - now.left;
+    const dy = old.top + ty - now.top;
+    if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) continue;
+    el.style.transition = 'none';
+    el.style.transform = `translate(${dx}px, ${dy}px)`;
+    void el.getBoundingClientRect(); // 强制回流，确保从位移处起步
+    el.style.transition = 'transform 150ms cubic-bezier(0.22, 0.61, 0.36, 1)';
+    el.style.transform = 'translate(0, 0)';
+  }
+}
+
+function clearFlipStyles() {
+  for (const el of els.track.querySelectorAll('.item')) {
+    el.style.transition = '';
+    el.style.transform = '';
+  }
+}
+
+/* 拖动锚点 1:1 跟手：transform = 指针位置 - 抓取偏移 - 当前槽位。
+   槽位随 insertBefore 变化后立即重算，视觉不跳。
+   reduced-motion 下去掉缩放 / 旋转的花活，只保留 1:1 跟随。 */
+function positionDraggedCard(p, px, py) {
+  const el = p.el;
+  const rect = el.getBoundingClientRect();
+  const [tx, ty] = currentTranslate(el);
+  const targetX = px - (p.grabDX || 0) - (rect.left - tx);
+  const targetY = py - (p.grabDY || 0) - (rect.top - ty);
+  el.style.transition = 'none';
+  el.style.transform = REDUCED_MOTION()
+    ? `translate(${targetX}px, ${targetY}px)`
+    : `translate(${targetX}px, ${targetY}px) scale(1.08) rotate(-1.5deg)`;
+}
+
+/* 拖拽排序的边缘自动滚动：把最左/最右的挂件往可视区边缘外拖时，
+   绳索按"指针深入边缘感应区的距离"成比例加速滚动 —— 否则最后一个
+   挂件永远拖不到绳的另一头（用户只能先松手、滚轮滚过去再拖）。
+   每帧滚动后用同一个指针坐标重算槽位（reorderAtPoint）和跟手
+   transform（positionDraggedCard），卡片在滚动中始终贴着指针。 */
+const edgeScroll = { x: 0, y: 0, raf: 0 };
+
+function edgeAutoScrollStop() {
+  if (edgeScroll.raf) {
+    cancelAnimationFrame(edgeScroll.raf);
+    edgeScroll.raf = 0;
+  }
+}
+
+function edgeAutoScrollStart() {
+  if (edgeScroll.raf) return;
+  const step = () => {
+    edgeScroll.raf = 0;
+    const act = ui.reorder || ui.textDrag; // 指针手势 / 文字 HTML5 拖拽都算
+    if (!act) return;
+    const t = els.track;
+    const max = t.scrollWidth - t.clientWidth;
+    if (max <= 0) return;
+    const rect = t.getBoundingClientRect();
+    const zone = 64; // 边缘感应区宽度（px）
+    let delta = 0;
+    if (edgeScroll.x < rect.left + zone) {
+      const depth = Math.min(zone, rect.left + zone - edgeScroll.x);
+      delta = -Math.max(2, (depth / zone) * 18); // 越靠边滚得越快，2~18 px/帧
+    } else if (edgeScroll.x > rect.right - zone) {
+      const depth = Math.min(zone, edgeScroll.x - (rect.right - zone));
+      delta = Math.max(2, (depth / zone) * 18);
+    }
+    const next = Math.max(0, Math.min(max, t.scrollLeft + delta));
+    if (next === t.scrollLeft) return; // 已经滚到头（或不在感应区）就停表
+    t.scrollLeft = next;
+    wheelSmooth.target = next; // 与滚轮平滑共享目标，两条机制不打架
+    reorderAtPoint(edgeScroll.x, edgeScroll.y, act.el);
+    if (ui.reorder && act.item.type !== 'text') {
+      positionDraggedCard(ui.reorder, edgeScroll.x, edgeScroll.y);
+    }
+    edgeScroll.raf = requestAnimationFrame(step);
+  };
+  edgeScroll.raf = requestAnimationFrame(step);
+}
+
+function reorderAtPoint(x, y, dragged) {  // 多选整组拖动时，插入位置只在“组外”的挂件里找（v1.16）
   const group = (ui.reorder && ui.reorder.group) || null;
   const inGroup = (n) => (group ? group.includes(n) : n === dragged);
   const others = [...els.track.querySelectorAll('.item')].filter((n) => !inGroup(n) && !n.classList.contains('lifting'));
@@ -589,6 +710,10 @@ function reorderAtPoint(x, y, dragged) {
   // 即便目标位置相同也会让节点重新挂载（动画/悬停状态被打断）。
   const anchor = group ? group[group.length - 1] : dragged;
   if (insertBefore ? insertBefore === anchor.nextElementSibling : !anchor.nextElementSibling) return;
+  // FLIP（§3）：DOM 重排前后各拍一次快照，被让位的卡片从旧位置滑回新槽位
+  const snapshot = new Map(
+    [...els.track.querySelectorAll('.item')].map((n) => [n, n.getBoundingClientRect()])
+  );
   els.track.insertBefore(dragged, insertBefore);
   // 组内其余成员按原相对顺序依次跟在拖动件后面
   if (group) {
@@ -599,16 +724,22 @@ function reorderAtPoint(x, y, dragged) {
       prev = g;
     }
   }
+  flipApply(snapshot, new Set([dragged]));
 }
 
 function lift(p) {
   p.lifted = true;
   markClickBlocked(600); // 已"抬起"就属于排序手势，松手后的 click 不复制
   ui.reorder = p;
-  // 多选：拖动的是选中件 → 整组一起抬起（组内相对顺序 = 绳上顺序）
+  // 多选：拖动的是选中件 → 整组一起抬起（组内相对顺序 = 绳上顺序）。
+  // 锚点卡片跟手（v1.19），组内其余成员只做描边高亮（lifting-soft），
+  // 变化由 FLIP 平滑带过去 —— 它们的 transform 要留给让位动画用。
   if (ui.selMode && ui.selected.has(p.item.id)) {
     p.group = selectedEls();
-    for (const g of p.group) g.classList.add('lifting');
+    for (const g of p.group) {
+      if (g === p.el) g.classList.add('lifting');
+      else g.classList.add('lifting-soft');
+    }
   } else {
     p.el.classList.add('lifting');
   }
@@ -619,11 +750,21 @@ function lift(p) {
 function commitReorder() {
   document.body.classList.remove('reordering');
   markClickBlocked(600);
+  edgeAutoScrollStop(); // 松手/转拖出后停掉边缘自动滚动
   if (ui.reorder) {
     const r = ui.reorder;
-    if (r.group) for (const g of r.group) g.classList.remove('lifting');
-    else r.el.classList.remove('lifting');
+    // 先移除 reordering（.item 的 transform 过渡随之恢复）再清 inline
+    // transform，跟手的卡片会平滑"落"回槽位，而不是瞬移
+    if (r.group) {
+      for (const g of r.group) {
+        g.classList.remove('lifting');
+        g.classList.remove('lifting-soft');
+      }
+    } else {
+      r.el.classList.remove('lifting');
+    }
     ui.reorder = null;
+    clearFlipStyles();
   }
   rope.busy(false);
   rope.reorder([...els.track.querySelectorAll('.item')].map((n) => n.dataset.id));
@@ -657,20 +798,40 @@ document.addEventListener('pointermove', (e) => {
     return;
   }
   reorderAtPoint(e.clientX, e.clientY, r.el);
+  positionDraggedCard(r, e.clientX, e.clientY); // §2：锚点卡片 1:1 跟手
+  // 记录指针位置并尝试启动边缘自动滚动（把末尾挂件拖向绳另一头时用）
+  edgeScroll.x = e.clientX;
+  edgeScroll.y = e.clientY;
+  edgeAutoScrollStart();
 });
 
-document.addEventListener('pointerup', () => {
+document.addEventListener('pointerup', (e) => {
   const p = ui.press;
   if (!p) return;
-  if (p.lifted) commitReorder(); // 在绳内松手 → 落位
-  else clearTimeout(p.timer);
+  if (p.lifted) {
+    // 松手瞬间用最终指针坐标补算一次落位再提交：边缘自动滚动进行中松手时，
+    // 最后一次 reorderAtPoint 可能是滚动中途的帧（松手帧与滚动帧交错），
+    // 直接提交会把挂件落在旧槽位（差 1~2 位）。
+    const r = ui.reorder;
+    if (r && r.item.type !== 'text' && (e.clientX || e.clientY)) {
+      reorderAtPoint(e.clientX, e.clientY, r.el);
+      positionDraggedCard(r, e.clientX, e.clientY);
+    }
+    commitReorder(); // 在绳内松手 → 落位
+  } else clearTimeout(p.timer);
   ui.press = null;
 });
-document.addEventListener('pointercancel', () => {
+document.addEventListener('pointercancel', (e) => {
   const p = ui.press;
   if (!p) return;
-  if (p.lifted) commitReorder();
-  else clearTimeout(p.timer);
+  if (p.lifted) {
+    const r = ui.reorder;
+    if (r && r.item.type !== 'text' && (e.clientX || e.clientY)) {
+      reorderAtPoint(e.clientX, e.clientY, r.el);
+      positionDraggedCard(r, e.clientX, e.clientY);
+    }
+    commitReorder();
+  } else clearTimeout(p.timer);
   ui.press = null;
 });
 
@@ -682,8 +843,15 @@ function ensureFolderOpen(item, anchorEl) {
 
 function openFolder(item, anchorEl) {
   ui.folder = { id: item.id, entries: [], index: 0, error: '' };
+  clearTimeout(ui.folderHideTimer);
+  els.folderPanel.classList.remove('closing');
   rope.setHeight(410);
-  positionFolderPanel(anchorEl);
+  const placement = positionFolderPanel(anchorEl);
+  if (placement === 'below') {
+    // 窗口太窄面板只能放卡片下方：把窗口加高到够容纳（主进程上限 600）。
+    // 此刻面板还是 hidden，getBoundingClientRect 全 0 —— 只能用锚点矩形 + 估算高度
+    rope.setHeight(Math.round(anchorEl.getBoundingClientRect().bottom + 8 + 280 + 12));
+  }
   renderFolderPanel();
   rope.listFolder(item.path).then((res) => {
     if (!ui.folder || ui.folder.id !== item.id) return;
@@ -728,11 +896,13 @@ function positionFolderPanel(anchorEl) {
     els.folderPanel.style.top = top + 'px';
     return;
   }
-  // 顶部（默认）：沿用 CSS 的 top:118px，这里只定水平位置
-  let left = Math.round(r.left - 60);
-  left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
-  els.folderPanel.style.left = left + 'px';
-  els.folderPanel.style.top = '';
+  // 顶部（默认）：统一放卡片**正下方**（v1.20b 用户拍板：所有顶部停靠的展开
+  // 都用同一形态，不再做侧面摆放），窗口加高到容纳面板（openFolder 读取返回值）。
+  // top 以卡片底边为准——不能拿当前 innerH 做上限（此时窗口可能还没长高）。
+  const top = Math.max(8, Math.round(r.bottom + 8));
+  els.folderPanel.style.left = Math.max(8, Math.min(Math.round(r.left - 60), window.innerWidth - width - 8)) + 'px';
+  els.folderPanel.style.top = top + 'px';
+  return 'below';
 }
 
 function cycleFolder(dir) {
@@ -762,11 +932,27 @@ function scheduleFolderClose() {
   ui.folderCloseTimer = setTimeout(closeFolder, 260);
 }
 
+/* 关闭面板：退出动画与入场对称（§7 从哪来回哪去），淡出完成后才
+   隐藏并把窗口高度收回去——先收高度会把淡出中的面板拦腰裁掉。
+   reduced-motion / instant 直接隐藏。 */
+function finishFolderHide() {
+  clearTimeout(ui.folderHideTimer);
+  els.folderPanel.classList.remove('closing');
+  els.folderPanel.hidden = true;
+  rope.setHeight(210);
+}
+
 function closeFolder(instant) {
   clearTimeout(ui.folderCloseTimer);
   ui.folder = null;
-  els.folderPanel.hidden = true;
-  rope.setHeight(210);
+  const panel = els.folderPanel;
+  if (panel.hidden || panel.classList.contains('closing')) return;
+  if (instant || matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    finishFolderHide();
+    return;
+  }
+  panel.classList.add('closing');
+  ui.folderHideTimer = setTimeout(finishFolderHide, 120);
 }
 
 /* 面板：竖排列表，一屏 3 行，滚轮滚动选择，选中行高亮。
@@ -964,7 +1150,32 @@ els.folderPanel.addEventListener('mouseleave', scheduleFolderClose);
 /* 挂件超出轨道宽度时，滚轮横向滚动（PRD 2.3 / AC-39）。
    监听挂在 document 上：绳索条的任意背景位置（卡片下方的空白、绳索两侧、
    状态栏）都能滚，而不是只有光标正好压在 #track 上才生效。
-   没有溢出就不拦截，避免吞掉正常滚动；面板内的滚轮归面板自己处理。 */
+   没有溢出就不拦截，避免吞掉正常滚动；面板内的滚轮归面板自己处理。
+   v1.19 §1：不再逐格瞬跳 —— 目标值累积，rAF 每帧向目标收敛（指数趋近），
+   连续滚动时目标一直前移，动画天然衔接；prefers-reduced-motion 直接赋值。 */
+const wheelSmooth = { target: 0, raf: 0 };
+
+function smoothTrackScroll(delta) {
+  const t = els.track;
+  const max = t.scrollWidth - t.clientWidth;
+  if (max <= 0) return;
+  const base = wheelSmooth.raf ? wheelSmooth.target : t.scrollLeft;
+  wheelSmooth.target = Math.max(0, Math.min(max, base + delta));
+  if (wheelSmooth.raf) return;
+  const step = () => {
+    const cur = t.scrollLeft;
+    const diff = wheelSmooth.target - cur;
+    if (Math.abs(diff) < 1) {
+      t.scrollLeft = wheelSmooth.target;
+      wheelSmooth.raf = 0;
+      return;
+    }
+    t.scrollLeft = cur + diff * 0.3;
+    wheelSmooth.raf = requestAnimationFrame(step);
+  };
+  wheelSmooth.raf = requestAnimationFrame(step);
+}
+
 document.addEventListener(
   'wheel',
   (e) => {
@@ -978,7 +1189,12 @@ document.addEventListener(
     // deltaMode: 0=像素 1=行 2=页
     const step = e.deltaMode === 1 ? d * 16 : e.deltaMode === 2 ? d * els.track.clientWidth : d;
     e.preventDefault();
-    els.track.scrollLeft = Math.max(0, Math.min(max, els.track.scrollLeft + step));
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      const base = wheelSmooth.raf ? wheelSmooth.target : els.track.scrollLeft;
+      els.track.scrollLeft = Math.max(0, Math.min(max, base + step));
+      return;
+    }
+    smoothTrackScroll(step);
   },
   { passive: false }
 );
@@ -1011,13 +1227,13 @@ document.addEventListener('dragover', (e) => {
 });
 document.addEventListener('drop', async (e) => {
   e.preventDefault();
+  hideVeil(); // 所有早退路径都先把遮罩/深度收干净，别留在半路
   if (ui.nativeDrag) return; // 自己拖出的东西，拖回自己窗口忽略
   if (ui.textDrag) {
     // 自己的文字挂件拖回绳上：只算排序，不重复挂
     if (ui.textDrag.reordered) commitReorder();
     return;
   }
-  hideVeil();
 
   const dt = e.dataTransfer;
 
@@ -1164,7 +1380,7 @@ function toggleSelect(id) {
 $('#btn-select').addEventListener('click', () => {
   const on = !ui.selMode;
   setSelMode(on);
-  toast(on ? '多选：点击卡片勾选（Ctrl+点击也可以），拖动整组排序 / 插入；Esc 或再点一次退出' : '已退出多选');
+  toast(on ? '多选：点击卡片勾选 · 拖动整组排序 / 插入 · Esc 或再点按钮退出' : '已退出多选');
 });
 
 /* ---------------- 设置 ----------------
@@ -1210,6 +1426,13 @@ rope.onEvent((ev) => {
       break;
     case 'open-settings':
       rope.openSettings(); // 兼容旧事件：主进程已经开始自己开窗，这里只是兜底
+      break;
+    case 'drag-ended':
+      // 主进程确认系统拖放已结束（sender.startDrag 返回 = drop 已完成）：
+      // 立刻解除 nativeDrag。此前要等满 2.5s 保护窗，用户把文件拖回来
+      // 想马上排序时 pointerdown 会被整窗拒绝，体感就是"没法排序了"。
+      clearTimeout(ui.nativeDragTimer);
+      ui.nativeDrag = false;
       break;
     case 'hidden':
       setRemoveMode(false); // 绳索收回时复位取件模式（主进程已复位，这里同步 UI）

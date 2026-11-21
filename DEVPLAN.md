@@ -613,3 +613,82 @@ npm run test:e2e  # 只跑 Electron 场景
 - **验收**：单测改为 ÷2.5（1080 工作区 → 432）并把矮屏保底用例改用 400 高屏（400÷2.5 = 160 → 168）；E2E AC-122 / AC-132 的期望公式同步。**96 单测 + 187 E2E = 283 项全绿**；实机截图 `.test/ui17-left-light.png` 核对（150% DPI 下窗高 ≈ 416 DIP，垂直居中、挂件与图标栏均完整）。
 - **顺手修的测试稳定性**：AC-151 在全量并行跑时偶发假失败（前面用例残留的点击抑制窗口），改为最多 6 次轮询重试；AC-143 / AC-145 同类抖动确认是并行资源竞争（单独跑 17/17 全过）。
 - **文档与发布**：PRD 升 v1.18（形态章 / 四向表格 / AC-122）；README 同步 exe 名、测试数、取下角标、停靠位置行、配色语义；新增 `CHANGELOG.md`；版本号 0.1.0 → 1.18.0，产出安装版与免安装版并发布 GitHub Release。
+
+### P31 动效手感专项：跟手拖拽 / FLIP / 弹簧 / 平滑滚动（2026-11-21，已完成）
+
+- **背景**：用户要求按 apple-design skill 再做一轮完整审视（上轮 P29 是静态视觉，本轮聚焦动态手感），列建议清单、风险高的先问再做。用户拍板：①~⑩ 全做（含②跟手拖拽、③主进程弹簧），⑪⑫ 不做。
+- **体检结论（按手感影响排序）**：① 排序让位瞬跳（`transition:none`，无 FLIP）；② 拖动卡片不跟手（原地缩放，槽位间"跳"）；③ 窗口动画固定 150ms easeOutCubic、12ms 定时器、中断重启（撞墙感）；④ 滚轮逐格瞬跳；⑤ 面板进有动画出是瞬间；⑥ 多选连点被 400ms 抑制窗吞（探针实测 60ms 连选只中 1 件）；⑦ 多选提示被 ellipsis 截断；⑧ 文字预览第 6 行露半截；⑨ README.md 腰斩；⑩ 无 reduced-motion。
+- **实现**：
+  - **②跟手**（app.js）：pointerdown 记 grabDX/DY；`positionDraggedCard()` 每次指针移动把锚点卡片 transform 设为 `指针 - 抓取偏移 - 当前槽位`（槽位随 insertBefore 变化即时补偿，视觉零跳变）；松手移除 reordering 后由 `.item` 自带 transform 过渡平滑落位。reduced-motion 下去掉缩放旋转花活只保留跟随。
+  - **①FLIP**：`reorderAtPoint` 前后各拍一次 rect 快照，`flipApply()` 对非锚点卡片从旧视觉位（含当前 transform，支持中断续算）150ms 滑回新槽位；多选组成员改 `.lifting-soft`（只描边不缩放，transform 让给 FLIP）。
+  - **③弹簧**（main.js）：临界阻尼弹簧 response 0.15 / damping 1.0，x/y 独立半隐式欧拉，速度存模块级跨 re-target 连续，收敛（<0.5px 且 <8px/s）后贴齐清零；8ms 步进真实 dt。response 0.25 实测收敛偏慢（E2E 读到中途值）改 0.15 ≈ 旧版节奏。
+  - **④滚轮**：目标值累积 + rAF 0.3 收敛；reduced-motion 直接赋值。
+  - **⑤面板退出**：`.closing` 四方向反向 keyframes 120ms，`finishFolderHide()` 淡出完才 `setHeight(210)`（先收高度会把面板裁半）；openFolder 清理 closing 残留。
+  - **⑥⑦**：selMode 分支改用 `gestureBusy()`（不含 suppressClickUntil）；toast 去 nowrap 允许两行。
+  - **⑧两个 CSS 深坑**：`.thumb` 是 flex 容器 → 预览块被 blockified → `-webkit-line-clamp` 整个失效（省略号照打、第 6 行画进 padding 区，Chrome 130 computed display 显示 flow-root）；修法 = thumb 退回 block + 底部留白改 margin-bottom（padding 区在裁剪盒内，第 6 行会露 4px）。行数 6 → 5。
+  - **⑨**：name 去 0.1px 字距（72.2px vs 73px 行宽差 0.8px 导致 break-word 腰斩）+ break-all 改 break-word。
+  - **⑩**：`prefers-reduced-motion` 媒体查询（悬停位移/动画时长归零），JS 侧 FLIP/滚轮/面板退出/跟手花活各自判断。
+- **测试适配**：滚轮三处断言改"等停稳再取基线"（`settledLeft()` 轮询）；AC-71 clamp 6→5；setPos 等待 260→450ms、AC-129 300→500ms。
+- **验收**：96 单测 + 187 E2E 全绿；探针复核——快速连选 2/2、跟手 transform 中途值正确且松手清空、面板 closing→hidden 时序正确、文字卡无残余、README.md 单行；截图 `.test/v19-*.png`。
+- **坑**：① Electron 33（Chromium 130）下 `-webkit-line-clamp` 在 flex 子项上完全失效且 computed display 显示 flow-root，非常隐蔽——省略号照样打，导致看起来"clamp 生效但漏一行"；② `CodeBuddy` 安全删除守卫同样会拦 electron-builder 与测试无关（本轮未涉及）；③ 探针连跑会残留 selMode 状态，先按当前态取反而非盲点按钮。
+
+### P32 拖拽排序的边缘自动滚动（2026-11-21，已完成）
+
+- **背景**：用户把最右侧的挂件拖向最左侧时，绳索不会自动滚动，末端的槽位根本够不到（必须松手→滚轮→再拖）。
+- **实现**（app.js）：`edgeScroll` 状态 + `edgeAutoScrollStart/Stop`。指针手势与文字 HTML5 拖拽两条排序路径在 move/drag 时记录指针坐标并启动 rAF 循环：指针进入绳可视区左右 64px 感应区且该方向有溢出时，按深入程度 2→18 px/帧渐加速滚动；每帧滚动后用同一指针坐标重算 reorderAtPoint（FLIP 照常）与 positionDraggedCard（卡片贴指针）；与 wheelSmooth 共享 target 避免两条滚动机制打架；滚到头或指针离开感应区自动停表。commitReorder 与文字 dragend 停止循环。
+- **测试**：runBasic 追加 AC-152（拖住停到左边缘，scrollLeft 必须滚到 0）/ AC-153（松手后 raf=0、挂件排到最前），溢出不足 320px 时先 rope.addText 造占位、测完按 id 清掉并还原顺序。96 单测 + 189 E2E 全绿。
+- **坑**：探针合成事件里文字挂件没有 pointer 手势（走 dragstart 路径），选拖拽目标必须按 `.name` 找文件挂件而不是 `.item:last-child`；`rope.reorder` 只落盘不即时重建 DOM，探针内别依赖它调整顺序。
+
+### P33 修复"拖出去再拖回来就没法排序"（2026-11-21，已完成）
+
+- **用户报告**：把文件拖出绳后，再拖回来就没办法排序了。
+- **根因**：`dragOutFromItem` 置 `ui.nativeDrag=true`，靠 2.5s 兜底定时器解除；期间 pointerdown 在入口处被整窗拒绝。用户"拖出→拖回来→马上想排序"的动作全部落在死区里，体感就是点不动 / 抬不起 / 排不了。主进程其实知道拖放何时结束（Windows 上 `sender.startDrag` 阻塞到 drop 完成），却从不通知渲染层。
+- **修复**：① 主进程在 startDrag 返回（拖放结束）即刻 `sendEvent({type:'drag-ended'})`，渲染层立即解除 nativeDrag（2.5s 定时器保留作兜底）；拖出失败路径（目标不存在 / startDrag 抛错）同样立刻解除。② pointerdown 手势残留自愈：系统拖拽可能吞掉 pointerup/pointercancel，若 press/reorder 残留（新按下 pointerId 不同 = 旧指针已消失），先清理再受理，排序永不锁死。③ drop 早退路径统一先 hideVeil。
+- **排查插曲（大坑）**：为复现写的 E2E/探针轮询代码把 Promise 参数命名为 `res` 却调用 `resolve()`——前几次 tick 正常，等条件满足那次 tick 调用未定义的 `resolve`，在定时器回调里抛未捕获异常，Promise 永不落定 → executeJavaScript 挂死、场景 180s 超时；此前的"手势卡死"探针观察全部由此笔误造成，属测试侧污染。已修正 scenarios.js 的 1 处笔误并全量回归。
+- **验收**：96 单测 + 191 E2E = 287 项全绿（含新 AC-154：drag-ended 后立即受理 pointerdown；AC-155：伪造残留手势被自愈清理）。
+
+### P34 文件夹面板不再遮挡触发卡片（2026-11-21，已完成）
+
+- **用户反馈**：顶部停靠时悬停文件夹挂件，展开的浏览列表直接盖住了触发它的卡片。
+- **实现**（app.js / styles.css）：`positionFolderPanel` 改为返回摆放方式——顶部停靠优先放卡片右侧（放不下用左侧），竖直方向与卡片顶对齐（top = 卡片顶 -28，夹紧窗口内）；两侧都放不下（窗口 < 卡片+332+20）时落到卡片正下方（top = 卡片底 +8）并 `setHeight(卡片底 + 8 + 280 + 12)` 加高窗口（主进程上限 600）。面板 `dataset.side` 记录在哪一侧，顶部停靠的入场/退场动画随之横向来去（pop-in-l/-r、pop-out-l/-r）。左/右/底停靠原本就是侧位/上位，不变。
+- **坑**：① 加高窗口时面板还是 `hidden`，`getBoundingClientRect` 全 0 → setHeight(12) 被主进程夹回 BASE_HEIGHT(210)，面板底部被裁——只能用锚点矩形 + 估算高度；② 兜底 top 不能拿当前 innerH 做上限（setHeight 是弹簧动画，求值时窗口还没长高）。
+- **测试**：新增 AC-156（面板与触发卡片矩形不相交、在下方或侧面、完整落在窗口内）。AC-119 顺带改为 `offsetTop/offsetLeft` 断言——`getBoundingClientRect` 含 transform，真实光标悬在某张卡片上时 `:hover` 的 translateY(-3px) 会造成环境性误报（鼠标垫片拦 JS 事件，拦不住 CSS :hover）。96 单测 + 192 E2E = 288 全绿。
+- **文档**：PRD v1.20b、README 使用表、CHANGELOG [未发布] v1.20b。
+
+### P34b 面板统一正下方 + 松手落位修正（2026-11-21，已完成）
+
+- **用户拍板**：P34 的"侧面优先、窄窗才落下方"不统一——顶部停靠统一改为面板**始终**在卡片正下方（卡片底 +8px），窗口加高容纳；删掉侧面摆放与 data-side 横向动画（CSS 一并清理）。
+- **顺带根除 AC-152/153 偶发失败**：全量连跑两轮各挂一次（start=end 不滚动 / 松手后 idx=2）。后者暴露真根因——`commitReorder` 直接提交当前 DOM 顺序，而边缘自动滚动进行中松手时最后一次 `reorderAtPoint` 是滚动中途的帧，松手帧与滚动帧交错就差 1~2 位。修法：pointerup/pointercancel 在提交前用最终指针坐标补算一次 `reorderAtPoint` + `positionDraggedCard`（pointercancel 坐标 0,0 与文字挂件路径都有守卫）。前一轮"start=end 不滚动"未再复现，判定为同源时序噪声。
+- **验收**：连续两轮全量 96 单测 + 192 E2E = 288 全绿。文档：PRD v1.20b、README、CHANGELOG 同步。
+
+### P35 设置窗口质感打磨（apple-design 第三轮，2026-11-21，已完成）
+
+- **用户要求**：按 apple-design skill 优化设置窗口。
+- **体检（按影响排序）**：① 说明文字被固定 190px 标签列硬挤，多处孤儿字断行（"…选/择"、"…挂/件"）；② 按钮:active 只有 translateY(1px)、无 focus-visible；③ 占用进度条 flex:1 被拉伸挤进按钮中间，分组语义混乱；④ 行标签 12.5px 常规体与 11px 说明层级不足；⑤ 无 prefers-reduced-motion。
+- **实现**（全部 CSS，id/结构零改动）：`.k` 改 `flex:0 1 auto`（min-width 150px）+ small 加 `text-wrap: pretty`（Chromium 130 支持）——断行全部消除且多数说明变单行，行高反而更矮；标签 `font-weight:500`；进度条改 `flex:0 1 200px`；`:active` 改 `scale(0.97)`；补 `:focus-visible` 蓝色焦点环（与输入框 focus 同语言）；补 reduced-motion 块。垂直节奏未动，内容仍一屏（scroll==client==647）。
+- **验收**：两主题截图核对（.test/v20b-settings-light/dark.png）；连续两轮 96 单测 + 192 E2E = 288 全绿。
+
+### P36 设置窗口文字可读性（apple-design 第四轮，2026-11-21，已完成）
+
+- **用户反馈**："字体显示有点看不清"，红框标出三张卡片的分组标题与行标签。
+- **体检**：真正不达标的是说明文字——`--text-faint: #98a1ae` 在白卡片上约 2.6:1（WCAG 小字要求 4.5:1）；其次是分组标题 11px + 1px 字距，小字号中文被拉得笔画稀碎；行标签 12.5px 与 11px 说明的层级也偏弱。
+- **实现**（仅 `settings.css`）：`--text-faint` 压深到 `#747e8c`（≈4.9:1），深色主题 `#7d8899 → #909bad`；`--text-dim` 压深到 `#566070`（按钮 / 路径 / 状态文字同步受益）；`.card h2` 11px→12px、字距 1px→0.5px（§15 字距随字号走）；`.k > span` 12.5px→13px、字重 500→600。
+- **约束处理**：字号增量会顶高内容，改完立刻验 `main` 的 `scrollHeight == clientHeight`——仍为 647，一屏约束（AC-94/116）未破；8 条说明文字全部单行。
+- **验收**：两主题截图核对；`npm test` 96 单测 + 192 E2E = 288 全绿。
+- **坑**：CDP 直接改 `data-theme` 后立即截图，按钮会拍成灰块（文字与底色都丢）——计算样式探针显示 `bg #262c38 / color #b6c1d2` 完全正常，属截图合成伪影，稍等再拍即正常，不要误判为 CSS 回归。
+
+### P37 托盘「显示悬挂绳」闪现即消失（2026-11-21，已完成）
+
+- **用户报告**：点托盘菜单「显示悬挂绳」，绳只显示一下很快消失。
+- **根因**：可见状态自动收回 = 指针不在窗口内累计 3 个轮询周期（POLL_MS=60 → ≈180ms）。托盘在屏幕角落，点击时光标必然不在绳窗口内 → 弹出即被收回。托盘点击 / 托盘菜单 / 二次启动三个入口全中招；鼠标恰好在停靠边上时靠边唤出碰巧正常，掩盖了问题。
+- **实现**：`showRope(opts)` 新增 `explicit` 语义——`summonPending=true` 时，autoHide 判定等指针第一次进入窗口才清位，期间不收回（geometry.js 新增纯函数 `autoHideTick`，main.js 轮询单拍抽成 `edgeWatchTick(injectedPoint)`，interval 只是不带参调用）。显式入口：second-instance / 托盘点击 / 托盘菜单「显示悬挂绳」；粘贴悬挂等被动弹出保持非显式原节奏。hideRope 复位 pending。
+- **测试**：单测 `autoHideTick` 4 条（E2E 全部冻结轮询，测不到这段逻辑，必须下放到纯函数）；E2E 新增 `summon` 场景，`__test.edgeWatchTick(注入坐标)` 逐拍驱动——AC-157 显式唤出 20 拍仍可见 / AC-158 指针来过一次后 3 拍收回 / AC-159 非显式原节奏。100 单测 + 196 E2E = 296 全绿（连续两轮）。
+- **文档**：PRD v1.20d（AC-157~159）、CHANGELOG v1.20d。
+
+### P38 「关于」卡片 + 2.0.0 正式发布（2026-11-21，已完成）
+
+- **用户要求**：① 设置里新增软件版本号 /「关于」页面；② 打包正式发布，版本号定为 2.0.0 上传 GitHub Release（版本号命名规则后续再议）。
+- **实现**：settingsSnapshot 增发 `version: app.getVersion()`；settings.html 末尾新增「关于」卡片（版本行 + tag 样式版本号，沿用 ② 色彩语义——版本是状态展示，用 accent tag）；settings.js refresh 填充。设置窗口默认高 780 → 830 消化新增卡片的垂直增量。
+- **测试**：item-limit 场景新增 AC-161（「关于」分组存在、版本号 x.y.z 格式、与 app.getVersion() 一致）；AC-116 一屏断言自动复验（scroll == client == 698）。两主题截图核对（.test/v20d-settings-light/dark.png）。全量 100 单测 + 200 E2E = 300 全绿。
+- **发布**：CHANGELOG 五个 [未发布] 段（v1.19 ~ v1.20d）合并为 `## [2.0.0] - 2026-11-21` 正式段（各迭代保留为 ### 分组）；PRD 文档版本行补 v2.0.0。git 提交 → `npm run dist`（NSIS 安装版 + portable 免安装版）→ 打 tag v2.0.0 → `gh release create` 上传两个产物。
+- **版本号命名**：用户明确 2.0.0 为主版本（1.18 → 2.0 是产品形态成熟度的大跨步，也留出后续命名规则的讨论空间）；规则本身待与用户一起定。

@@ -181,3 +181,51 @@ test('isEdgeHit 四向热区：只认停靠边 + 绳长范围', () => {
   assert.equal(geo.isEdgeHit({ x: gt.shown.x + 5, y: 0 }, FS, WA, gt.shown, 'top'), true);
   assert.equal(geo.isEdgeHit({ x: gt.shown.x - 5, y: 0 }, FS, WA, gt.shown, 'top'), false);
 });
+
+/* ---------------- v1.20d：显式唤出后的收回判定（autoHideTick） ---------------- */
+
+const WB = { x: 640, y: 0, width: 640, height: 210 }; // 顶部停靠的 shown 窗口
+const INSIDE = { x: 800, y: 60 };
+const OUTSIDE = { x: 100, y: 900 }; // 托盘方向（左下角），远在窗口外
+
+test('autoHideTick：非显式唤出保持原节奏——离开累计 3 拍即收回', () => {
+  const r1 = geo.autoHideTick(OUTSIDE, WB, false, false, false, 0, 3);
+  assert.equal(r1.hide, false, '第 1 拍宽限');
+  const r2 = geo.autoHideTick(OUTSIDE, WB, false, false, r1.summonPending, r1.outsideTicks, 3);
+  const r3 = geo.autoHideTick(OUTSIDE, WB, false, false, r2.summonPending, r2.outsideTicks, 3);
+  assert.equal(r3.hide, true, '第 3 拍收回');
+  // 悬停 / 拖拽中不收回
+  assert.equal(geo.autoHideTick(OUTSIDE, WB, true, false, false, 2, 3).hide, false);
+  assert.equal(geo.autoHideTick(OUTSIDE, WB, false, true, false, 2, 3).hide, false);
+  // 回到窗口内清零
+  const back = geo.autoHideTick(INSIDE, WB, false, false, false, 2, 3);
+  assert.equal(back.outsideTicks, 0);
+  assert.equal(back.hide, false);
+});
+
+test('autoHideTick：显式唤出后指针没来过，多少拍都不收回', () => {
+  let s = { summonPending: true, outsideTicks: 0, hide: false };
+  for (let i = 0; i < 50; i++) {
+    s = geo.autoHideTick(OUTSIDE, WB, false, false, s.summonPending, s.outsideTicks, 3);
+    assert.equal(s.hide, false, '第 ' + (i + 1) + ' 拍也不该收回');
+    assert.equal(s.summonPending, true, 'pending 保持等待');
+  }
+});
+
+test('autoHideTick：显式唤出后指针来过一次，离开再走常规宽限收回', () => {
+  // 指针进入窗口：清除 pending
+  const enter = geo.autoHideTick(INSIDE, WB, false, false, true, 0, 3);
+  assert.equal(enter.summonPending, false);
+  assert.equal(enter.hide, false);
+  // 离开后照常 3 拍收回
+  const o1 = geo.autoHideTick(OUTSIDE, WB, false, false, enter.summonPending, enter.outsideTicks, 3);
+  const o2 = geo.autoHideTick(OUTSIDE, WB, false, false, o1.summonPending, o1.outsideTicks, 3);
+  const o3 = geo.autoHideTick(OUTSIDE, WB, false, false, o2.summonPending, o2.outsideTicks, 3);
+  assert.equal(o3.hide, true);
+});
+
+test('autoHideTick：显式唤出且指针一开始就在窗口内，立即清除 pending', () => {
+  const r = geo.autoHideTick(INSIDE, WB, false, false, true, 0, 3);
+  assert.equal(r.summonPending, false);
+  assert.equal(r.hide, false);
+});

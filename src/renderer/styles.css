@@ -379,18 +379,23 @@ body {
 .item .name {
   width: 100%;
   /* 文件名是挂件卡片的主体内容（§15 排印：层级靠字重+字号组合）：
-     12px + 中字重，两行截断，比旧版 10.5px 明显可读 */
+     12px + 中字重，两行截断，比旧版 10.5px 明显可读。
+     不加字距：0.1px × 9 字符 ≈ 1px，"README.md"（72.2px）刚好挤不进
+     73px 内容行而被 break-word 腰斩成 "README.m / d"（v1.19 实测）。 */
   font-size: 12px;
   font-weight: 500;
   line-height: 1.3;
-  letter-spacing: 0.1px;
+  letter-spacing: 0;
   color: var(--text);
   text-align: center;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  word-break: break-all;
+  /* v1.19 §15：不再 break-all —— "README.md" 会被腰斩成 "README.m / d"。
+     overflow-wrap 允许超长无空格串兜底换行，但优先在标点/空格处断。 */
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 .item .badge {
@@ -495,19 +500,35 @@ body {
   display: -webkit-box;
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
-  word-break: break-all;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 /* 文字挂件只有这一处正文：预览块撑满整张卡片，多显示几行，
-   下面不再排一行重复的首行摘要（卡片总高保持 104px 不变）。 */
+   下面不再排一行重复的首行摘要（卡片总高保持 104px 不变）。
+   display 必须退回 block：thumb 若保持 flex 容器，预览块作为 flex
+   子项会被 blockified，-webkit-line-clamp 整个失效（v1.19 实测：
+   省略号照打、第 6 行却照样露出半截）。 */
 .item.t-text .thumb {
   height: auto;
   flex: 1;
   min-height: 0;
+  display: block;
 }
 
 .item.t-text .text-preview {
-  -webkit-line-clamp: 6;
+  /* 5 行：11px × 1.35 行距下 6 行放不进卡片内容区。
+     两个关键（v1.19 实测）：
+     · thumb 必须退回 display:block —— flex 子项被 blockified 后
+       -webkit-line-clamp 失效；
+     · padding-bottom 必须换成 margin-bottom —— 内容溢出时第 6 行会画进
+       自己的 padding 区（overflow 裁剪发生在 padding 盒边缘），底部留白
+       改用 margin 后裁剪线正好贴住第 5 行，残余半行彻底不可见。 */
+  -webkit-line-clamp: 5;
+  height: auto;
+  flex: 0 0 auto;
+  padding-bottom: 0;
+  margin-bottom: 4px;
 }
 
 .item.invalid {
@@ -521,6 +542,15 @@ body {
 .item.lifting {
   transform: scale(1.08) rotate(-1.5deg);
   z-index: 40;
+  border-color: var(--accent);
+  box-shadow: var(--shadow-lift);
+  cursor: grabbing;
+}
+
+/* 多选整组拖动时锚点以外的成员：只描边高亮不缩放（v1.19）——
+   它们的 transform 留给 FLIP 让位动画用，缩放会打架 */
+.item.lifting-soft {
+  z-index: 30;
   border-color: var(--accent);
   box-shadow: var(--shadow-lift);
   cursor: grabbing;
@@ -655,6 +685,36 @@ html[data-pos="right"] #folder-panel {
 @keyframes pop-in-r {
   from { opacity: 0; transform: translateX(6px) scale(0.98); }
   to { opacity: 1; transform: none; }
+}
+
+/* 退出动画（§7 空间一致性：从哪来回哪去）——方向与入场相反，
+   JS 在 120ms 后把面板真正隐藏。closing 期间 pointer-events 关闭，
+   防止淡出中的面板拦住对下层卡片的点击。 */
+#folder-panel.closing {
+  animation: pop-out 0.12s ease forwards;
+  pointer-events: none;
+}
+html[data-pos="bottom"] #folder-panel.closing {
+  animation-name: pop-out-b;
+}
+html[data-pos="left"] #folder-panel.closing {
+  animation-name: pop-out-l;
+}
+html[data-pos="right"] #folder-panel.closing {
+  animation-name: pop-out-r;
+}
+
+@keyframes pop-out {
+  to { opacity: 0; transform: translateY(-6px) scale(0.98); }
+}
+@keyframes pop-out-b {
+  to { opacity: 0; transform: translateY(6px) scale(0.98); }
+}
+@keyframes pop-out-l {
+  to { opacity: 0; transform: translateX(-6px) scale(0.98); }
+}
+@keyframes pop-out-r {
+  to { opacity: 0; transform: translateX(6px) scale(0.98); }
 }
 
 .fp-head {
@@ -898,9 +958,11 @@ html[data-pos="right"] #folder-panel {
   font-size: 12px;
   color: var(--text);
   z-index: 90;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* v1.19 §16.6：长提示（如多选引导）不再被 ellipsis 截掉"怎么退出"，
+     允许两行换行；短提示视觉不变 */
+  white-space: normal;
+  text-align: center;
+  line-height: 1.45;
   animation: pop-in 0.14s ease;
 }
 
@@ -1253,5 +1315,26 @@ html[data-pos="right"] .item:hover {
   html[data-pos="right"] .btn-label {
     background: var(--card);
     backdrop-filter: none;
+  }
+}
+
+/* ---------- 减少动态（系统无障碍设置，v1.19 §14） ----------
+   不是"没有反馈"：位移类动画换成淡入淡出，颜色过渡保留。
+   FLIP / 滚轮平滑 / 面板退出在 JS 里另行判断，这里只管 CSS。 */
+@media (prefers-reduced-motion: reduce) {
+  .item,
+  .pill,
+  .icon-btn,
+  #toast,
+  #folder-panel {
+    animation-duration: 0.01ms !important;
+    transition-property: opacity, background-color, border-color, box-shadow !important;
+    transition-duration: 120ms !important;
+  }
+  /* 悬停位移改为静态高亮。注意不动 .item.lifting 的 transform：
+     拖动跟手是直接操纵（§14 —— 直接操纵不属于"动画"），
+     inline transform 要原样生效，只是 JS 会去掉缩放/旋转的花活 */
+  .item:hover {
+    transform: none !important;
   }
 }

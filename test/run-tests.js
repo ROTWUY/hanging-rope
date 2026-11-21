@@ -117,6 +117,10 @@ if (only === 'all' || only === 'e2e') {
   // 整组拖出（files 数组 + 跳过计数）/ Esc 退出 / 互斥 / 竖向图标栏
   e2e('multi-select', {});
 
+  // 显式唤出（托盘"显示悬挂绳"）不被自动收回吞掉（v1.20d）：
+  // 显式唤出等指针进入过窗口一次才开始常规收回；非显式保持原节奏。
+  e2e('summon', {});
+
   // 深色主题重启场景：预置 settings.theme = 'dark' 的 state.json，
   // 验证主进程把主题带进 loadFile 的 query、首帧不闪浅色。
   const themeDir = mkUserData('theme-restart');

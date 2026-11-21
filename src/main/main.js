@@ -35,6 +35,13 @@ const POLL_MS = 60;
 const CLIP_POLL_MS = 700;
 const MAX_CLIP_IMAGE_BYTES = 20 * 1024 * 1024;
 
+/* 设置窗口的原生底色：先于 CSS 绘制，避免深色主题启动时闪一下白。
+   绳索主窗口是 transparent，不需要这一层。 */
+const THEME_NATIVE_BG = { light: '#f4f7fb', dark: '#1b1f28' };
+function nativeThemeBg() {
+  return THEME_NATIVE_BG[store.getSettings().theme] || THEME_NATIVE_BG.light;
+}
+
 let win = null;
 let tray = null;
 let quiting = false;
@@ -56,9 +63,9 @@ process.on('unhandledRejection', (r) => logLine('unhandledRejection: ' + r));
 
 /* 悬浮窗状态 */
 let ropeVisible = false;
-let ropeHeight = BASE_HEIGHT;
-let winX = 0;
-let winW = 800;
+let ropeThickness = BASE_HEIGHT; // 窗口厚度（顶部/底部=高度，左右=宽度）；文件夹面板展开时由渲染层调到 410
+let ropePos = 'top'; // 停靠边（v1.14），与 store.settings.ropePosition 同步
+let ropeGeom = null; // { shown, hidden } 由 computeRopeGeometry 按当前停靠边与厚度算出
 let outsideTicks = 0;
 let animToken = 0; // 动画令牌：新动画打断旧动画
 let busyDrag = false; // 拖拽进行中禁止收回
@@ -94,17 +101,14 @@ app.setAppUserModelId('com.local.hangingrope');
 /* ---------------- 悬浮窗 ---------------- */
 
 function createWindow() {
-  const display = screen.getPrimaryDisplay();
-  // 绳索只占屏幕宽度的 1/3，居中于顶部（几何计算见 geometry.js，可单测）
-  const bounds = geo.computeWindowBounds(display.bounds, BASE_HEIGHT);
-  winW = bounds.width;
-  winX = bounds.x;
+  ropePos = geo.normalizePosition(store.getSettings().ropePosition);
+  ropeGeom = computeRopeGeometry();
 
   win = new BrowserWindow({
-    x: bounds.x,
-    y: bounds.y,
-    width: bounds.width,
-    height: BASE_HEIGHT,
+    x: ropeGeom.hidden.x,
+    y: ropeGeom.hidden.y,
+    width: ropeGeom.hidden.width,
+    height: ropeGeom.hidden.height,
     frame: false,
     transparent: true,
     backgroundColor: '#00000000',
@@ -127,7 +131,14 @@ function createWindow() {
   });
   win.setAlwaysOnTop(true, 'screen-saver');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
+  // 主题随 URL 一并交给渲染层：head 里的 theme.js 在 CSS 生效前就设好
+  // <html data-theme>，深色启动不会先闪一帧浅色；停靠位置同理（data-pos）。
+  win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'), {
+    query: {
+      theme: store.getSettings().theme || 'light',
+      pos: ropePos,
+    },
+  });
 
   win.on('closed', () => {
     win = null;
@@ -136,18 +147,26 @@ function createWindow() {
   win.on('blur', updateEscapeRegistration);
 }
 
-function animateY(targetY, height, done) {
+/* 按当前停靠边与厚度重算窗口几何（shown = 贴边可见，hidden = 挪出屏幕外） */
+function computeRopeGeometry() {
+  const display = screen.getPrimaryDisplay();
+  return geo.computeRopeBounds(display.bounds, display.workArea, ropeThickness, ropePos);
+}
+
+/* 从当前 bounds 平滑滑到目标 bounds（x/y 只有一个轴在动，另一个保持不动） */
+function animateBounds(target, done) {
   const token = ++animToken;
-  const fromY = win.getBounds().y;
+  const from = win.getBounds();
   const dur = 150;
   const start = Date.now();
   const step = () => {
     if (!win || token !== animToken) return;
     const t = Math.min(1, (Date.now() - start) / dur);
     const e = 1 - Math.pow(1 - t, 3); // easeOutCubic
-    const y = Math.round(fromY + (targetY - fromY) * e);
+    const x = Math.round(from.x + (target.x - from.x) * e);
+    const y = Math.round(from.y + (target.y - from.y) * e);
     try {
-      win.setBounds({ x: winX, y, width: winW, height });
+      win.setBounds({ x, y, width: target.width, height: target.height });
     } catch {
       /* ignore */
     }
@@ -161,7 +180,8 @@ function showRope() {
   if (!win || ropeVisible) return;
   ropeVisible = true;
   outsideTicks = 0;
-  animateY(0, ropeHeight);
+  ropeGeom = computeRopeGeometry(); // 厚度可能刚被文件夹面板改过
+  animateBounds(ropeGeom.shown);
   sendEvent({ type: 'shown' });
 }
 
@@ -173,22 +193,22 @@ function hideRope(force = false) {
   clearTimeout(escReleaseTimer);
   unregisterHoverShortcuts();
   sendEvent({ type: 'hidden', removeMode });
-  animateY(-ropeHeight, ropeHeight);
+  animateBounds(ropeGeom.hidden);
 }
 
-/* 鼠标轮询：顶部触边唤出；离开窗口一段时间后收回 */
-let edgeTicks = 0; // 顶部边缘连续停留计数（防误触：掠过不唤出）
+/* 鼠标轮询：贴当前停靠边唤出；离开窗口一段时间后收回 */
+let edgeTicks = 0; // 屏幕边缘连续停留计数（防误触：掠过不唤出）
 
 function startEdgeWatcher() {
   // 测试用：冻结轮询，由测试脚本显式调用 showRope/hideRope，避免真实光标位置干扰
   if (process.env.HANGING_ROPE_TEST_FREEZE_WATCHER) return;
   setInterval(() => {
-    if (!win) return;
+    if (!win || !ropeGeom) return;
     const p = screen.getCursorScreenPoint();
-    const primary = screen.getPrimaryDisplay().bounds;
+    const display = screen.getPrimaryDisplay();
 
     if (!ropeVisible) {
-      const hit = geo.isTopEdgeHit(p, primary, winX, winW, EDGE_TRIGGER_PX);
+      const hit = geo.isEdgeHit(p, display.bounds, display.workArea, ropeGeom.shown, ropePos, EDGE_TRIGGER_PX);
       const step = geo.nextEdgeTicks(edgeTicks, hit, 2);
       edgeTicks = step.ticks;
       if (step.show) showRope();
@@ -436,6 +456,10 @@ function stopClipWatcher() {
  * 基线在判重前先更新，避免监听轮询每轮都重复弹提示。
  */
 function hangFromClipboard(force = false) {
+  // 满额时直接返回 limit：轮询（force=false）静默，避免每 200ms 刷一次提示；
+  // 用户主动 Ctrl+V 由 onPastePressed 统一给出原因。
+  if (!freeSlots()) return { ok: false, reason: 'limit' };
+
   /* 1) 文件 / 文件夹（资源管理器复制） */
   const files = readClipboardFiles();
   if (files.length) {
@@ -449,17 +473,22 @@ function hangFromClipboard(force = false) {
       sendEvent({ type: 'toast', text: '已在绳上，未重复添加', level: 'ok' });
       return { ok: false, reason: 'same' };
     }
-    const added = addPaths(fresh, { silent: true });
+    let report = null;
+    const added = addPaths(fresh, { silent: true, report: (r) => { report = r; } });
     if (added.length) {
-      const skipped = files.length - added.length;
-      sendEvent({
-        type: 'toast',
-        text: skipped
-          ? `已悬挂 ${added.length} 件，跳过 ${skipped} 个重复项`
-          : '已悬挂剪贴板文件',
-        level: 'ok',
-      });
+      const dup = (report && report.skipped) || 0;
+      const lim = (report && report.blocked) || 0;
+      const text = lim
+        ? `已悬挂 ${added.length} 件，另有 ${lim} 件超出 ${itemLimit()} 件上限`
+        : dup
+        ? `已悬挂 ${added.length} 件，跳过 ${dup} 个重复项`
+        : '已悬挂剪贴板文件';
+      sendEvent({ type: 'toast', text, level: lim ? 'warn' : 'ok' });
       return { ok: true };
+    }
+    if (report && report.blocked) {
+      warnLimit(report.blocked);
+      return { ok: false, reason: 'limit' };
     }
     return { ok: false, reason: 'failed' };
   }
@@ -519,6 +548,8 @@ function onPastePressed() {
   const msg =
     r.reason === 'empty'
       ? '剪贴板里没有可悬挂的内容'
+      : r.reason === 'limit'
+      ? limitText()
       : r.reason === 'too-long'
       ? '文字太长，建议另存为文件再挂'
       : r.reason === 'failed'
@@ -553,13 +584,42 @@ function addTextItem(text, fromWatcher = false, opts = {}) {
     sendEvent({ type: 'toast', text: `文字太长（>${Math.round(store.MAX_TEXT_CHARS / 1000)}KB），建议保存为文件再拖`, level: 'warn' });
     return null;
   }
+  if (!freeSlots()) {
+    warnLimit();
+    return null;
+  }
   const item = store.addItem({ id: store.newId(), type: 'text', text: t, addedAt: Date.now() });
+  if (!item) {
+    warnLimit();
+    return null;
+  }
   sendState();
   if (!fromWatcher && !opts.silent) sendEvent({ type: 'toast', text: '已悬挂文字', level: 'ok' });
   return item;
 }
 
 /* ---------------- 新增挂件 ---------------- */
+
+/* 挂件件数上限（v1.12）：设置里给 6 个档位，默认 300。
+   所有新增入口统一走 freeSlots() 预检查，给用户一条能看懂的提示；
+   store.addItem 里还有最后一道兜底，任何路径都绕不过去。 */
+function itemLimit() {
+  return store.getSettings().itemLimit;
+}
+
+function freeSlots() {
+  return Math.max(0, itemLimit() - store.getItems().length);
+}
+
+function limitText(blocked = 0) {
+  return blocked
+    ? `已达上限 ${itemLimit()} 件，跳过 ${blocked} 件（可在设置里调整）`
+    : `已达上限 ${itemLimit()} 件，未添加（可在设置里调整）`;
+}
+
+function warnLimit(blocked = 0) {
+  sendEvent({ type: 'toast', text: limitText(blocked), level: 'warn' });
+}
 
 /**
  * 统一判重入口：所有挂件添加路径（拖入 / 复制即悬挂 / Ctrl+V / 文字路径 /
@@ -657,12 +717,16 @@ function healShortcuts() {
  * 把文件/文件夹路径挂上绳（拖入、剪贴板文件、Ctrl+V、文字路径都走这里）。
  * 同一目标 — 大小写/斜杠/末尾分隔符变体、.lnk 与其本体 — 只保留一张；
  * 重复项跳过并提示，但不影响同一批里其它新目标的添加。
+ * v1.12：一次批量最多挂到 settings.itemLimit 为止，超出的部分跳过并单独提示，
+ * 不会"整批失败"；opts.report 供剪贴板监听自己汇总提示用。
  * @param {string[]} pathList
- * @param {{silent?:boolean}} opts silent 供剪贴板监听自己汇总提示
+ * @param {{silent?:boolean, report?:function}} opts silent 供剪贴板监听自己汇总提示
  */
 function addPaths(pathList, opts = {}) {
   const added = [];
   let skipped = 0;
+  let blocked = 0;
+  let slots = freeSlots();
   const seen = new Set(); // 同一次批量里也可能出现等价变体
   for (const raw of pathList || []) {
     if (!raw) continue;
@@ -680,6 +744,11 @@ function addPaths(pathList, opts = {}) {
       skipped++;
       continue;
     }
+    // 判重之后才占名额：重复项不该消耗件数上限
+    if (slots <= 0) {
+      blocked++;
+      continue;
+    }
     if (key) seen.add(key);
     const item = store.addItem({
       id: store.newId(),
@@ -689,6 +758,12 @@ function addPaths(pathList, opts = {}) {
       shortcut: resolved.shortcut || undefined,
       addedAt: Date.now(),
     });
+    if (!item) {
+      // store 层兜底（例如状态刚被其它入口改动）
+      blocked++;
+      continue;
+    }
+    slots--;
     added.push(item);
   }
   if (skipped && !opts.silent) {
@@ -698,6 +773,8 @@ function addPaths(pathList, opts = {}) {
       level: 'ok',
     });
   }
+  if (blocked && !opts.silent) warnLimit(blocked);
+  if (typeof opts.report === 'function') opts.report({ added: added.length, skipped, blocked });
   if (added.length) sendState();
   return added;
 }
@@ -723,6 +800,13 @@ function pinPath(raw) {
   if (existing) {
     return { ok: true, already: true, id: existing.id, name: existing.name };
   }
+  if (!freeSlots()) {
+    return {
+      ok: false,
+      reason: 'limit',
+      message: `已达上限 ${itemLimit()} 件，请先取下部分挂件或在设置里调高上限`,
+    };
+  }
 
   const isDir = st.isDirectory();
   const item = store.addItem({
@@ -733,6 +817,9 @@ function pinPath(raw) {
     shortcut: resolved.shortcut || undefined,
     addedAt: Date.now(),
   });
+  if (!item) {
+    return { ok: false, reason: 'limit', message: limitText() };
+  }
   sendState();
   return { ok: true, already: false, id: item.id, name: item.name };
 }
@@ -817,6 +904,11 @@ function addImageBuffer(buf, extHint, opts = {}) {
     if (!opts.silent) sendEvent({ type: 'toast', text: '这张图片已经在绳上了', level: 'ok' });
     return null;
   }
+  // 上限检查必须早于写缓存：满额时不能白白留下一份没有挂件引用的图片副本
+  if (!freeSlots()) {
+    warnLimit();
+    return null;
+  }
 
   const saved = store.saveImageToCache(bytes, ext);
   let size = { width: null, height: null };
@@ -841,6 +933,10 @@ function addImageBuffer(buf, extHint, opts = {}) {
     bytes: bytes.length,
     addedAt: Date.now(),
   });
+  if (!item) {
+    warnLimit();
+    return null;
+  }
   checkCacheLimit();
   sendState();
   if (!opts.fromWatcher && !opts.silent) {
@@ -851,6 +947,11 @@ function addImageBuffer(buf, extHint, opts = {}) {
 
 /** 从网页拖图片进来：解析出图片地址后下载缓存（这是工具唯一的联网动作，仅发生在用户主动拖拽网页图片时） */
 async function addImageFromUrl(url, hintName) {
+  // 先把上限挡在最前面，避免满额时还去联网下载一张注定挂不上的图
+  if (!freeSlots()) {
+    warnLimit();
+    return null;
+  }
   try {
     const u = String(url || '');
     if (!u) throw new Error('没有图片地址');
@@ -891,9 +992,26 @@ function checkCacheLimit() {
 
 /* ---------------- 拖出 ---------------- */
 
+/**
+ * 读取随包携带的图片资源。
+ * 打包后 assets 位于 app.asar 内部，nativeImage.createFromPath 走原生文件读取、
+ * 读不到 asar 里的条目；改用被 Electron 打过补丁的 fs + createFromBuffer，
+ * 开发态（普通目录）与发布态（asar）都能取到图标。
+ * @param {string} name assets/ 下的文件名
+ * @returns {Electron.NativeImage|null}
+ */
+function appAssetImage(name) {
+  try {
+    const file = path.join(app.getAppPath(), 'assets', name);
+    const img = nativeImage.createFromBuffer(fs.readFileSync(file));
+    return img.isEmpty() ? null : img;
+  } catch {
+    return null;
+  }
+}
+
 function genericDragIcon() {
-  const img = nativeImage.createFromPath(path.join(app.getAppPath(), 'assets', 'tray.png'));
-  return img.isEmpty() ? nativeImage.createEmpty() : img;
+  return appAssetImage('tray.png') || nativeImage.createEmpty();
 }
 
 /**
@@ -921,6 +1039,8 @@ function planDrag(payload) {
 const dragLog = [];
 
 function startDrag(payload, sender) {
+  // v1.16 多选整组拖出：files 数组一次带出，插入端按数组顺序逐一插入
+  if (payload && payload.kind === 'multi') return startMultiDrag(payload.list, sender);
   const plan = planDrag(payload);
   if (plan.warning) {
     sendEvent({ type: 'toast', text: plan.warning, level: 'warn' });
@@ -931,7 +1051,7 @@ function startDrag(payload, sender) {
   }
 
   let icon = plan.icon || genericDragIcon();
-  if (!icon || icon.isEmpty()) icon = nativeImage.createFromPath(path.join(app.getAppPath(), 'assets', 'icon.png'));
+  if (!icon || icon.isEmpty()) icon = appAssetImage('icon.png') || nativeImage.createEmpty();
 
   busyDrag = true;
   if (process.env.HANGING_ROPE_TEST_DRY_DRAG) {
@@ -950,6 +1070,55 @@ function startDrag(payload, sender) {
     return false;
   }
   // Windows 上 startDrag 会阻塞到拖放结束；这里再兜底释放，避免窗口被永久“占用”
+  setTimeout(() => {
+    busyDrag = false;
+  }, 800);
+  return true;
+}
+
+/* v1.16 多选整组拖出：逐项校验（文字 / 源丢失自动跳过并提示），
+   可插入的按绳上顺序组成 files 数组，一次系统拖放全部带出 */
+function startMultiDrag(list, sender) {
+  const plan = dragPlan.planMultiDrag(list, {
+    exists: (p) => fs.existsSync(p),
+    stat: statSafe,
+    resolveShortcut,
+    imageIconFor: (p) => {
+      try {
+        const img = nativeImage.createFromPath(p);
+        return img.isEmpty() ? null : img.resize({ width: 64 });
+      } catch {
+        return null;
+      }
+    },
+  });
+  if (plan.skipped) {
+    sendEvent({ type: 'toast', text: `已跳过 ${plan.skipped} 件不可插入的对象`, level: 'warn' });
+  }
+  if (!plan.ok) {
+    if (!plan.skipped) sendEvent({ type: 'toast', text: '选中的对象都无法插入', level: 'warn' });
+    return false;
+  }
+
+  let icon = appAssetImage('icon.png') || genericDragIcon();
+  if (!icon || icon.isEmpty()) icon = nativeImage.createEmpty();
+
+  busyDrag = true;
+  if (process.env.HANGING_ROPE_TEST_DRY_DRAG) {
+    dragLog.push({ at: Date.now(), target: plan.targets, kind: 'multi', warning: '', skipped: plan.skipped });
+    setTimeout(() => {
+      busyDrag = false;
+    }, 300);
+    return true;
+  }
+  try {
+    sender.startDrag({ files: plan.targets, icon });
+  } catch (e) {
+    busyDrag = false;
+    logLine('startDrag(multi) error: ' + e.message);
+    sendEvent({ type: 'toast', text: '拖出失败：' + e.message, level: 'warn' });
+    return false;
+  }
   setTimeout(() => {
     busyDrag = false;
   }, 800);
@@ -1012,7 +1181,11 @@ function openSettingsWindow() {
 
   const area = screen.getPrimaryDisplay().workArea;
   const width = 620;
-  const height = 570;
+  /* 三张卡片（外观 / 图片缓存 / 悬挂绳）加上头部与底部操作栏，v1.14 新增「停靠位置」
+     一行后内容自然高度约 730 DIP。旧值 700 会把最后一张卡片挤进滚动区，
+     高 DPI 或系统字体偏大时底部「退出程序 / 关闭」还会被窗口边缘裁掉。
+     这里给足高度并按工作区兜底，小屏幕也不会把窗口顶出屏幕。 */
+  const height = Math.min(780, Math.max(560, area.height - 40));
   settingsWin = new BrowserWindow({
     width,
     height,
@@ -1024,7 +1197,7 @@ function openSettingsWindow() {
     // 普通窗口：系统边框 + 右上角关闭按钮，没有透明/无边框/置顶这些特性
     frame: true,
     transparent: false,
-    backgroundColor: '#15171c',
+    backgroundColor: nativeThemeBg(),
     resizable: true,
     maximizable: false,
     minimizable: true,
@@ -1042,7 +1215,9 @@ function openSettingsWindow() {
     },
   });
   settingsWin.setMenuBarVisibility(false);
-  settingsWin.loadFile(path.join(__dirname, '..', 'renderer', 'settings.html'));
+  settingsWin.loadFile(path.join(__dirname, '..', 'renderer', 'settings.html'), {
+    query: { theme: store.getSettings().theme || 'light' },
+  });
   settingsWin.once('ready-to-show', () => {
     if (!settingsWindowAlive()) return;
     settingsWin.show();
@@ -1055,7 +1230,12 @@ function openSettingsWindow() {
 }
 
 function notifySettings() {
-  if (settingsWindowAlive()) settingsWin.webContents.send('settings:changed');
+  if (!settingsWindowAlive()) return;
+  // 主题切换时连窗口的原生底色一起换，避免缩放/滚动露出浅色底边
+  if (typeof settingsWin.setBackgroundColor === 'function') {
+    settingsWin.setBackgroundColor(nativeThemeBg());
+  }
+  settingsWin.webContents.send('settings:changed');
 }
 
 /* 设置窗口需要的全部数据：设置项 + 缓存占用 + 挂件数 */
@@ -1068,22 +1248,66 @@ function settingsSnapshot() {
   };
 }
 
+/* ---------------- 停靠位置（v1.14） ----------------
+   切换即时生效：重算几何 → 立即放到新边的可见/隐藏位置 → 托盘单选同步。
+   渲染层布局由 sendState 推送的 settings.ropePosition 驱动（app.js 设 data-pos）。 */
+function applyRopePosition(pos) {
+  const next = geo.normalizePosition(pos);
+  if (next !== ropePos) {
+    ropePos = next;
+    ropeGeom = computeRopeGeometry();
+    if (win) {
+      if (ropeVisible) animateBounds(ropeGeom.shown);
+      else win.setBounds(ropeGeom.hidden);
+    }
+  }
+  refreshTrayMenu();
+}
+
 /* ---------------- 托盘 ---------------- */
 
-function createTray() {
-  const icon = nativeImage.createFromPath(path.join(app.getAppPath(), 'assets', 'tray.png'));
-  tray = new Tray(icon.isEmpty() ? genericDragIcon() : icon);
-  const menu = Menu.buildFromTemplate([
+const POS_LABELS = { top: '顶部', left: '左侧', right: '右侧', bottom: '底部' };
+
+function buildTrayTemplate() {
+  return [
     { label: '显示悬挂绳', click: () => showRope() },
     { label: '设置', click: () => openSettingsWindow() },
+    {
+      label: '停靠位置',
+      submenu: geo.POSITIONS.map((p) => ({
+        label: POS_LABELS[p],
+        type: 'radio',
+        checked: ropePos === p,
+        click: () => {
+          store.setSettings({ ropePosition: p });
+          applyRopePosition(p);
+          sendState();
+        },
+      })),
+    },
     { type: 'separator' },
     { label: '清空全部挂件', click: () => { store.clearItems(); store.pruneOrphans(); sendState(); } },
     { type: 'separator' },
     { label: '退出悬挂绳', click: () => app.quit() },
-  ]);
+  ];
+}
+
+function createTray() {
+  const icon = appAssetImage('tray.png') || genericDragIcon();
+  tray = new Tray(icon);
+  tray.setContextMenu(Menu.buildFromTemplate(buildTrayTemplate()));
   tray.setToolTip('悬挂绳');
-  tray.setContextMenu(menu);
   tray.on('click', () => showRope());
+}
+
+/* 停靠位置变化后重建菜单，让单选勾随实际状态走 */
+function refreshTrayMenu() {
+  if (!tray) return;
+  try {
+    tray.setContextMenu(Menu.buildFromTemplate(buildTrayTemplate()));
+  } catch {
+    /* ignore */
+  }
 }
 
 /* ---------------- IPC ---------------- */
@@ -1188,12 +1412,13 @@ function registerIpc() {
   });
   ipcMain.on('set-height', (_e, h) => {
     const nh = Math.max(BASE_HEIGHT, Math.min(600, h | 0));
-    if (nh === ropeHeight) return;
-    ropeHeight = nh;
+    if (nh === ropeThickness) return;
+    ropeThickness = nh;
     // 拖放进行中绝不调整窗口尺寸：源窗口在系统拖拽过程中被改变会引发崩溃
     if (busyDrag) return;
-    if (ropeVisible) animateY(0, ropeHeight);
-    else win.setBounds({ x: winX, y: -ropeHeight, width: winW, height: ropeHeight });
+    ropeGeom = computeRopeGeometry();
+    if (ropeVisible) animateBounds(ropeGeom.shown);
+    else win.setBounds(ropeGeom.hidden);
   });
 
   /* 复制模式 */
@@ -1225,9 +1450,10 @@ function registerIpc() {
     return store.getItems().length;
   });
   ipcMain.handle('settings:set', (_e, patch) => {
-    const before = store.getSettings().hotkey;
+    const before = store.getSettings();
     const s = store.setSettings(patch || {});
-    if (s.hotkey !== before) registerHotkey();
+    if (s.hotkey !== before.hotkey) registerHotkey();
+    if (s.ropePosition !== before.ropePosition) applyRopePosition(s.ropePosition);
     sendState();
     return s;
   });
@@ -1330,7 +1556,8 @@ app.whenReady().then(async () => {
             samples.push({ x, ...s });
             if (x === 140 || x === 290 || x === 220) {
               try {
-                const img = await win.webContents.capturePage({ x: 0, y: 0, width: winW, height: ropeHeight });
+                const b0 = win.getBounds();
+                const img = await win.webContents.capturePage({ x: 0, y: 0, width: b0.width, height: b0.height });
                 fs.writeFileSync(path.join(app.getAppPath(), '.test', `drag-${x}.png`), img.toPNG());
               } catch {
                 /* ignore */
@@ -1353,7 +1580,7 @@ app.whenReady().then(async () => {
       }
       setTimeout(async () => {
         try {
-          const img = await win.webContents.capturePage({ x: 0, y: 0, width: winW, height: 400 });
+          const img = await win.webContents.capturePage({ x: 0, y: 0, width: win.getBounds().width, height: 400 });
           fs.writeFileSync(
             path.join(app.getAppPath(), '.test', 'window.png'),
             img.toPNG()
@@ -1414,12 +1641,15 @@ if (process.env.HANGING_ROPE_TEST_USERDATA) {
     copyItemToClipboard,
     openItemTarget,
     openSettingsWindow,
+    applyRopePosition,
+    buildTrayTemplate,
     getWindow: () => win,
     getSettingsWindow: () => settingsWin,
     settingsSnapshot,
     snapshot: () => ({
       ropeVisible,
-      ropeHeight,
+      ropeThickness,
+      ropePos,
       removeMode,
       busyDrag,
       hovering,

@@ -19,6 +19,12 @@ const els = {
   hotkey: $('#hotkey-label'),
   copyState: $('#copy-state'),
   itemCount: $('#item-count'),
+  limitNote: $('#limit-note'),
+  limitOpts: Array.from(document.querySelectorAll('.limit-opt')),
+  posOpts: Array.from(document.querySelectorAll('.pos-opt')),
+  posNote: $('#pos-note'),
+  themeLight: $('#btn-theme-light'),
+  themeDark: $('#btn-theme-dark'),
   status: $('#status'),
 };
 
@@ -43,6 +49,86 @@ function status(text, warn) {
   }, 3600);
 }
 
+/* ---------------- 主题 ---------------- */
+
+/* 三个动作合成一处：改 <html data-theme>（CSS 立刻生效）+ 同步分段按钮态。
+   主窗口由主进程的 state 推送走同一套 ropeTheme.apply，所以两边永远一致。 */
+function applyTheme(theme) {
+  const t = window.ropeTheme.apply(theme);
+  els.themeLight.classList.toggle('on', t === 'light');
+  els.themeDark.classList.toggle('on', t === 'dark');
+  els.themeLight.setAttribute('aria-pressed', String(t === 'light'));
+  els.themeDark.setAttribute('aria-pressed', String(t === 'dark'));
+  return t;
+}
+
+async function chooseTheme(theme) {
+  applyTheme(theme); // 先本地预览，不等 IPC 往返
+  const s = await rope.setTheme(theme);
+  applyTheme(s.theme); // 以主进程校验后的真实值为准
+  status(s.theme === 'dark' ? '已切换到深色主题' : '已切换到浅色主题');
+  refresh();
+}
+
+els.themeLight.addEventListener('click', () => chooseTheme('light'));
+els.themeDark.addEventListener('click', () => chooseTheme('dark'));
+
+/* ---------------- 件数上限（v1.12） ---------------- */
+
+/* 与主进程 store.ITEM_LIMITS 保持一致；非法值一律回落到默认 300。
+   之所以把 300 也放进档位里：否则用户改过一次后就再也选不回默认值。 */
+const ITEM_LIMITS = [200, 300, 350, 400, 450, 500];
+const DEFAULT_ITEM_LIMIT = 300;
+
+function applyItemLimit(n) {
+  const v = ITEM_LIMITS.includes(n) ? n : DEFAULT_ITEM_LIMIT;
+  for (const b of els.limitOpts) {
+    const on = Number(b.dataset.limitValue) === v;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+  }
+  return v;
+}
+
+async function chooseItemLimit(n) {
+  applyItemLimit(n); // 先本地预览，不等 IPC 往返
+  const s = await rope.setItemLimit(n);
+  const real = applyItemLimit(s.itemLimit); // 以主进程校验后的真实值为准
+  status(`件数上限已设为 ${real} 件`);
+  refresh();
+}
+
+for (const b of els.limitOpts) {
+  b.addEventListener('click', () => chooseItemLimit(Number(b.dataset.limitValue)));
+}
+
+/* ---------------- 停靠位置（v1.14） ---------------- */
+
+/* 与主进程 geo.POSITIONS 对应；非法值回落 top。 */
+const POS_LABELS = { top: '顶部', left: '左侧', right: '右侧', bottom: '底部' };
+
+function applyRopePosition(pos) {
+  const v = POS_LABELS[pos] ? pos : 'top';
+  for (const b of els.posOpts) {
+    const on = b.dataset.posValue === v;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+  }
+  return v;
+}
+
+async function chooseRopePosition(pos) {
+  applyRopePosition(pos); // 先本地预览，不等 IPC 往返
+  const s = await rope.setSettings({ ropePosition: pos });
+  const real = applyRopePosition(s.ropePosition); // 以主进程校验后的真实值为准
+  status(`绳子已停靠到屏幕${POS_LABELS[real]}`);
+  refresh();
+}
+
+for (const b of els.posOpts) {
+  b.addEventListener('click', () => chooseRopePosition(b.dataset.posValue));
+}
+
 /* ---------------- 视图刷新 ---------------- */
 
 let info = null;
@@ -50,6 +136,9 @@ let info = null;
 async function refresh() {
   info = await rope.settingsInfo();
   const s = info.settings || {};
+  applyTheme(s.theme);
+  const lim = applyItemLimit(s.itemLimit);
+  applyRopePosition(s.ropePosition);
 
   els.cacheDir.textContent = s.resolvedCacheDir || '（默认目录）';
   els.cacheDir.title = s.resolvedCacheDir || '';
@@ -69,7 +158,15 @@ async function refresh() {
   els.copyState.textContent = info.copyMode ? '已开启' : '已关闭';
   els.copyState.classList.toggle('on', !!info.copyMode);
 
-  els.itemCount.textContent = `当前 ${info.itemCount} 件`;
+  const count = info.itemCount;
+  els.itemCount.textContent = `当前 ${count} 件 / 上限 ${lim} 件`;
+  const over = count > lim;
+  els.limitNote.textContent = over
+    ? `当前超出上限 ${count - lim} 件，请先取下或调高档位（已有挂件不会被删除）`
+    : count === lim
+    ? '已达上限，新挂件暂不添加，可在右侧调高档位'
+    : `最多挂 ${lim} 件，已满时不再添加新挂件`;
+  els.limitNote.classList.toggle('warn', over);
   return info;
 }
 

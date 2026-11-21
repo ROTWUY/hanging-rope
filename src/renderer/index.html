@@ -6,6 +6,7 @@
         content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' file: data:;">
   <title>悬挂绳</title>
   <link rel="stylesheet" href="styles.css">
+  <script src="theme.js"></script>
 </head>
 <body>
   <div id="shell">
@@ -15,16 +16,28 @@
       </div>
       <div id="remove-hint" class="pill warn" hidden>按住 Esc 中：点击挂件即可取下 · 松开 Esc 退出</div>
       <div id="controls">
-        <button id="btn-clear" class="icon-btn" title="清空全部挂件">清空</button>
-        <button id="btn-settings" class="icon-btn" title="设置">设置</button>
+        <button id="btn-clear" class="icon-btn" title="清空全部挂件">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 10v6M14 10v6"/></svg>
+          <span class="btn-label">清空</span>
+        </button>
+        <button id="btn-select" class="icon-btn" title="多选：点击卡片勾选（Ctrl+点击也可以），拖动整组排序或一起插入；Esc 或再点一次退出">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="M8.5 12.5l2.5 2.5 5-5.5"/></svg>
+          <span class="btn-label">多选</span>
+        </button>
+        <button id="btn-settings" class="icon-btn" title="设置">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3M5.3 5.3l2.1 2.1M16.6 16.6l2.1 2.1M18.7 5.3l-2.1 2.1M7.4 16.6l-2.1 2.1"/></svg>
+          <span class="btn-label">设置</span>
+        </button>
       </div>
     </div>
 
-    <div id="cord"></div>
+    <div id="body">
+      <div id="cord"></div>
 
-    <div id="track-wrap">
-      <div id="track"></div>
-      <div id="empty-hint">把 文件 / 文件夹 / 文字 / 图片 拖到这条绳上挂着 · 鼠标停在绳上按 Ctrl+V 也可粘贴悬挂</div>
+      <div id="track-wrap">
+        <div id="track"></div>
+        <div id="empty-hint">把 文件 / 文件夹 / 文字 / 图片 拖到这条绳上挂着 · 鼠标停在绳上按 Ctrl+V 也可粘贴悬挂</div>
+      </div>
     </div>
   </div>
 

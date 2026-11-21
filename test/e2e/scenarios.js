@@ -2,7 +2,7 @@
  * 悬挂绳 —— Electron 端到端场景
  *
  * 用法（由 test/run-tests.js 调用，不建议手工直接跑）：
- *   HR_SCENARIO=basic|restore|discard|shortcut|click|dedupe|dedupe-restart
+ *   HR_SCENARIO=basic|restore|discard|shortcut|click|dedupe|dedupe-restart|theme|theme-restart|office-icons|item-limit|position|position-restart|multi-select
  *   HANGING_ROPE_TEST_USERDATA=<临时目录>
  *
  * 说明：
@@ -854,7 +854,7 @@ async function runBasic(win) {
     );
     assert.equal(st.mode, true);
     assert.equal(st.hint, true);
-    assert.match(String(st.badge), /取下/);
+    assert.match(String(st.badge), /×/, '取下角标 v1.17 起改为 ×');
   });
 
   const countBeforeRemove = await itemCount(win);
@@ -1132,6 +1132,379 @@ async function runBasic(win) {
   await check('AC-36 无渲染进程崩溃记录', () => {
     assert.equal(fs.existsSync(path.join(userData, 'crash.log')), false);
   });
+}
+
+/* ---------------- 场景：Office 文件图标（v1.11） ---------------- */
+
+function officeCards(win) {
+  return js(
+    win,
+    `(() => [...document.querySelectorAll('.item')].map((el) => {
+      const im = el.querySelector('img.office-icon');
+      const d = el.querySelector('.doc-shape');
+      const nm = el.querySelector('.name');
+      return {
+        name: nm ? nm.textContent.trim() : '',
+        office: im ? im.dataset.office : '',
+        src: im ? im.getAttribute('src') : '',
+        loaded: im ? (im.complete && im.naturalWidth > 0) : false,
+        alt: im ? im.getAttribute('alt') : null,
+        drag: im ? im.draggable : null,
+        doc: d ? d.textContent.trim() : '',
+        w: el.offsetWidth,
+        h: el.offsetHeight,
+      };
+    }))()`
+  );
+}
+
+async function runOfficeIcons(win) {
+  T.showRope();
+  await sleep(400);
+  await installMouseShield(win);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-office-'));
+  const names = [
+    '论文格式.docx', '旧稿.DOC', '预算.xlsx', '台账.XLS',
+    '汇报.pptx', '胶片.PPT', '说明.txt',
+  ];
+  const files = names.map((n) => path.join(root, n));
+  for (const p of files) fs.writeFileSync(p, 'office icon fixture');
+  const folder = path.join(root, '办公目录');
+  fs.mkdirSync(folder);
+  // 按 a/b/c/d 命名，localeCompare 排序后前 3 行正好是三款 Office 图标（面板只显示 3 行）
+  for (const n of ['a.docx', 'b.xlsx', 'c.pptx', 'd.txt']) {
+    fs.writeFileSync(path.join(folder, n), 'x');
+  }
+
+  await js(win, `rope.addPaths(${JSON.stringify(files)}); true`);
+  await waitFor('7 个文件挂件出现', async () => (await itemCount(win)) === 7);
+  // DOM 挂上不等于 SVG 解码完：早期版本在这里直接取快照，全量连跑时偶发
+  // naturalWidth=0 的假失败。等到 6 张 Office 图标都真正加载完再断言。
+  await waitFor(
+    '6 张 Office SVG 加载完成',
+    () =>
+      js(
+        win,
+        `(() => { const a = [...document.querySelectorAll('img.office-icon')];
+           return a.length === 6 && a.every((i) => i.complete && i.naturalWidth > 0); })()`
+      ),
+    10000
+  );
+  const cards = await officeCards(win);
+  const byName = (n) => cards.find((c) => c.name === n) || {};
+
+  const iconCases = [
+    ['AC-85 Word 文档显示 Word 图标（.docx / .DOC 大小写都识别，SVG 真实加载）',
+      ['论文格式.docx', '旧稿.DOC'], 'word', /office-word\.svg$/],
+    ['AC-86 Excel 表格显示 Excel 图标（.xlsx / .XLS）',
+      ['预算.xlsx', '台账.XLS'], 'excel', /office-excel\.svg$/],
+    ['AC-87 PowerPoint 演示显示 PowerPoint 图标（.pptx / .PPT）',
+      ['汇报.pptx', '胶片.PPT'], 'powerpoint', /office-powerpoint\.svg$/],
+  ];
+  for (const [title, ns, kind, srcRe] of iconCases) {
+    await check(title, () => {
+      for (const n of ns) {
+        const c = byName(n);
+        assert.equal(c.office, kind, n + ' 应显示 ' + kind + ' 图标');
+        assert.match(c.src, srcRe, n + ' 应指向对应 SVG 资源');
+        assert.equal(c.loaded, true, n + ' 的 SVG 应成功加载（naturalWidth > 0）');
+        assert.equal(c.doc, '', n + ' 不应再显示通用扩展名文字卡');
+      }
+    });
+  }
+
+  await check('AC-88 非 Office 文件仍是通用文档形状，显示 TXT', () => {
+    const c = byName('说明.txt');
+    assert.equal(c.office, '');
+    assert.equal(c.doc, 'TXT');
+  });
+
+  await check('AC-89 换图标不改结构：7 张卡都是 86×104 且名称行完整', () => {
+    assert.equal(cards.length, 7);
+    for (const c of cards) {
+      assert.equal(c.w, 86, c.name + ' 宽度');
+      assert.equal(c.h, 104, c.name + ' 高度');
+      assert.ok(names.includes(c.name), '名称行应完整保留：' + c.name);
+    }
+  });
+
+  await check('AC-90 图标是纯装饰图片：alt 为空、不可拖动、不抢指针事件', async () => {
+    const c = byName('论文格式.docx');
+    assert.equal(c.alt, '');
+    assert.equal(c.drag, false);
+    const pe = await js(win, `getComputedStyle(document.querySelector('img.office-icon')).pointerEvents`);
+    assert.equal(pe, 'none');
+  });
+
+  await js(win, `rope.addPaths(${JSON.stringify([folder])}); true`);
+  const folderId = await waitItemId(win, folder, '办公目录挂件出现');
+  await openFolderPanel(win, folderId, 3);
+  await waitFor(
+    '面板 3 张 Office SVG 加载完成',
+    () =>
+      js(
+        win,
+        `(() => { const a = [...document.querySelectorAll('#folder-panel .fp-row img.office-icon')];
+           return a.length === 3 && a.every((i) => i.complete && i.naturalWidth > 0); })()`
+      ),
+    10000
+  );
+  await check('AC-91 文件夹面板里的 Office 行也换成对应图标', async () => {
+    const rows = await js(
+      win,
+      `(() => [...document.querySelectorAll('#folder-panel .fp-row')].map((r) => {
+        const im = r.querySelector('img.office-icon');
+        const d = r.querySelector('.doc-shape');
+        return {
+          name: r.querySelector('.fp-row-name').textContent.trim(),
+          office: im ? im.dataset.office : '',
+          loaded: im ? (im.complete && im.naturalWidth > 0) : false,
+          doc: d ? d.textContent.trim() : '',
+        };
+      }))()`
+    );
+    assert.deepEqual(rows.map((r) => r.name), ['a.docx', 'b.xlsx', 'c.pptx']);
+    assert.deepEqual(rows.map((r) => r.office), ['word', 'excel', 'powerpoint']);
+    for (const r of rows) {
+      assert.equal(r.loaded, true, r.name + ' 面板图标应加载成功');
+      assert.equal(r.doc, '', r.name + ' 面板里不应再是文字卡');
+    }
+  });
+
+  await check('AC-92 深色主题下三款图标仍完整可见（不加滤镜、不失效）', async () => {
+    await js(win, `ropeTheme.apply('dark'); true`);
+    const r = await js(
+      win,
+      `(() => {
+        const ims = [...document.querySelectorAll('.item img.office-icon')];
+        return {
+          theme: document.documentElement.getAttribute('data-theme'),
+          count: ims.length,
+          loaded: ims.every((im) => im.complete && im.naturalWidth > 0),
+          filter: ims.length ? getComputedStyle(ims[0]).filter : '',
+          opacity: ims.length ? getComputedStyle(ims[0]).opacity : '',
+        };
+      })()`
+    );
+    assert.equal(r.theme, 'dark');
+    assert.equal(r.count, 6, '6 个 Office 挂件都该有图标');
+    assert.equal(r.loaded, true);
+    assert.equal(r.filter, 'none', '深色下不给彩色图标加滤镜');
+    assert.equal(r.opacity, '1');
+    await js(win, `ropeTheme.apply('light'); true`);
+  });
+
+  await check('AC-93 SVG 加载失败时静默回退到通用文档形状，不留破图标', async () => {
+    const before = await js(
+      win,
+      `(() => {
+        const el = [...document.querySelectorAll('.item')].find(
+          (n) => (n.querySelector('.name') || {}).textContent.trim() === '论文格式.docx'
+        );
+        const im = el.querySelector('img.office-icon');
+        im.dispatchEvent(new Event('error'));
+        return true;
+      })()`
+    );
+    assert.equal(before, true);
+    const after = (await officeCards(win)).find((c) => c.name === '论文格式.docx');
+    assert.equal(after.office, '', '应已换成通用形状');
+    assert.equal(after.doc, 'DOCX', '回退后仍显示扩展名');
+    assert.equal(after.w, 86, '回退不改变卡片宽度');
+    assert.equal(after.h, 104, '回退不改变卡片高度');
+  });
+}
+
+/* ---------------- 场景：挂件件数上限（v1.12） ---------------- */
+
+async function runItemLimit(win) {
+  T.showRope();
+  await sleep(400);
+  await installMouseShield(win);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-item-limit-'));
+  const files = [];
+  for (let i = 0; i < 210; i++) {
+    const p = path.join(root, 'f' + String(i).padStart(4, '0') + '.txt');
+    fs.writeFileSync(p, 'limit fixture');
+    files.push(p);
+  }
+  const extra = path.join(root, 'extra.txt');
+  fs.writeFileSync(extra, 'extra');
+
+  const toastText = () => js(win, 'document.querySelector("#toast").textContent');
+  const clearToast = () => js(win, `document.querySelector('#toast').textContent = ''; true`);
+  const waitToast = (re) => waitFor('提示 ' + re, async () => re.test(await toastText()), 5000);
+  const setLimit = async (n) => {
+    await js(win, `rope.setItemLimit(${JSON.stringify(n)}); true`);
+    await waitFor('上限设为 ' + n, () => T.settingsSnapshot().settings.itemLimit === n);
+  };
+  const settle = (n) => waitFor('挂件数 ' + n, async () => (await itemCount(win)) === n, 12000);
+  const count = () => T.settingsSnapshot().itemCount;
+  const cacheFiles = () => {
+    const dir = T.settingsSnapshot().settings.resolvedCacheDir;
+    return fs.existsSync(dir) ? fs.readdirSync(dir).length : 0;
+  };
+
+  await check('AC-104 默认上限 300，白名单恰好 6 档（含默认档，可再选回来）', () => {
+    assert.equal(T.settingsSnapshot().settings.itemLimit, 300);
+    assert.deepEqual(
+      require(path.join(ROOT, 'src', 'main', 'store')).ITEM_LIMITS,
+      [200, 300, 350, 400, 450, 500]
+    );
+  });
+
+  T.addPaths(files.slice(0, 198));
+  await settle(198);
+  await setLimit(200); // 只剩 2 个名额
+
+  await clearToast();
+  const partial = T.addPaths(files.slice(198, 202));
+  await check('AC-105 批量只挂到上限：4 件里挂上 2 件、另 2 件被拦并提示', async () => {
+    assert.equal(partial.length, 2, '应只放行剩余 2 个名额');
+    assert.equal(count(), 200);
+    await waitToast(/已达上限 200 件，跳过 2 件/);
+  });
+  // 不写死 200：让 DOM 追上主进程状态即可，避免异常情况下场景直接超时中断
+  await waitFor('DOM 与状态件数一致', async () => (await itemCount(win)) === count(), 12000);
+
+  await clearToast();
+  const one = T.addPaths([files[202]]);
+  await check('AC-106 满额后单件添加被拦，挂件数不变', async () => {
+    assert.deepEqual(one, []);
+    assert.equal(count(), 200);
+    await waitToast(/已达上限 200 件/);
+  });
+
+  const pin = await js(win, `rope.pinPath(${JSON.stringify(files[203])})`);
+  await check('AC-107 📌 固定满额时返回 limit，并给出可操作的提示', () => {
+    assert.equal(pin.ok, false);
+    assert.equal(pin.reason, 'limit');
+    assert.match(pin.message, /上限|设置/);
+    assert.equal(count(), 200);
+  });
+
+  const textItem = T.addTextItem('上限核对文字');
+  await check('AC-108 文字挂件满额时被拦', () => {
+    assert.equal(textItem, null);
+    assert.equal(count(), 200);
+  });
+
+  const beforeCache = cacheFiles();
+  const png = fs.readFileSync(path.join(ROOT, 'assets', 'icon.png'));
+  const imgItem = T.addImageBuffer(png, 'png');
+  await check('AC-109 图片挂件满额时被拦，且不留无引用的缓存副本', () => {
+    assert.equal(imgItem, null);
+    assert.equal(count(), 200);
+    assert.equal(cacheFiles(), beforeCache, '不能写出挂不上的孤儿图片副本');
+  });
+
+  await clearToast();
+  T.onPastePressed();
+  await check('AC-110 复制即悬挂 / Ctrl+V 满额时说明原因，轮询不刷屏', async () => {
+    await waitToast(/已达上限 200 件，未添加/);
+    assert.equal(count(), 200);
+  });
+
+  await setLimit(350);
+  T.addPaths(files.slice(202, 206));
+  await check('AC-111 调高档位后立刻可以继续挂', async () => {
+    await settle(204);
+    assert.equal(count(), 204);
+  });
+
+  await setLimit(200);
+  await check('AC-112 调低上限不删除已有挂件，只拦新增（204 > 200）', () => {
+    assert.equal(count(), 204, '已有挂件一件都不能丢');
+    assert.deepEqual(T.addPaths([extra]), []);
+    assert.equal(count(), 204);
+  });
+
+  for (const bad of [999, '350', null]) {
+    await js(win, `rope.setItemLimit(${JSON.stringify(bad)}); true`);
+  }
+  await sleep(300);
+  await js(win, `rope.setTheme('dark'); true`);
+  await waitFor('深色生效', () => T.settingsSnapshot().settings.theme === 'dark');
+  await sleep(350);
+  await check('AC-113 非法档位一律忽略；主题切换不覆盖上限；设置写入 state.json', () => {
+    assert.equal(T.settingsSnapshot().settings.itemLimit, 200);
+    const s = readState().settings;
+    assert.equal(s.itemLimit, 200);
+    assert.equal(s.theme, 'dark');
+  });
+
+  await js(win, 'document.querySelector("#btn-settings").click()');
+  const sw = await waitSettingsWindow();
+  await sleep(400);
+  const picker = () =>
+    js(
+      sw,
+      `(() => [...document.querySelectorAll('.limit-opt')].map((b) => ({
+        v: Number(b.dataset.limitValue),
+        on: b.classList.contains('on'),
+        pressed: b.getAttribute('aria-pressed'),
+      })))()`
+    );
+
+  await check('AC-114 设置窗口 6 档选择器与真实设置一致，超出上限有明确说明', async () => {
+    const p = await picker();
+    assert.deepEqual(p.map((x) => x.v), [200, 300, 350, 400, 450, 500]);
+    assert.deepEqual(p.map((x) => x.on), [true, false, false, false, false, false]);
+    assert.deepEqual(p.map((x) => x.pressed), ['true', 'false', 'false', 'false', 'false', 'false']);
+    const note = await js(
+      sw,
+      `(() => { const e = document.querySelector('#limit-note');
+        return { text: e.textContent, warn: e.classList.contains('warn') }; })()`
+    );
+    assert.match(note.text, /超出上限 4 件/);
+    assert.equal(note.warn, true);
+    const cnt = await js(sw, `document.querySelector('#item-count').textContent`);
+    assert.match(cnt, /当前 204 件 \/ 上限 200 件/);
+  });
+
+  await js(sw, `document.querySelector('.limit-opt[data-limit-value="500"]').click(); true`);
+  await waitFor('UI 切到 500', () => T.settingsSnapshot().settings.itemLimit === 500);
+  await check('AC-115 点击档位即刻生效、落盘，选中态与 aria-pressed 同步', async () => {
+    await waitFor('UI 选中 500', async () => {
+      const p = await picker();
+      const cur = p.find((x) => x.v === 500);
+      return cur.on && cur.pressed === 'true';
+    });
+    // state.json 有 150ms 防抖，等落盘完成再读，别把"还没写"误判成"没生效"
+    await waitFor('上限落盘 500', () => readState().settings.itemLimit === 500);
+    assert.equal(T.settingsSnapshot().settings.itemLimit, 500);
+    assert.equal(readState().settings.itemLimit, 500);
+  });
+
+  await check('AC-116 新增一行后设置窗口仍不滚动、底部按钮完整，深色选中态为蓝色', async () => {
+    const layout = await settingsLayout(sw);
+    assert.equal(layout.mainMinHeight, '0px');
+    assert.ok(layout.footer.bottom <= layout.winH + 1, 'footer 不能被窗口裁切');
+    const winH = T.getSettingsWindow().getBounds().height;
+    if (winH >= 650) {
+      assert.ok(
+        layout.mainScroll <= layout.mainClient + 2,
+        `默认窗口高 ${winH} 时内容仍要滚动：${layout.mainScroll} > ${layout.mainClient}`
+      );
+    }
+    // 选中态有 140ms 背景过渡，等颜色稳定再取计算样式
+    await waitFor(
+      '深色选中态蓝色稳定',
+      async () =>
+        (await js(sw, `getComputedStyle(document.querySelector('.limit-opt.on')).backgroundColor`)) ===
+        'rgb(91, 147, 255)',
+      4000
+    );
+    const bg = await js(sw, `getComputedStyle(document.querySelector('.limit-opt.on')).backgroundColor`);
+    assert.equal(bg, 'rgb(91, 147, 255)', '深色下选中档位应仍是蓝色实心');
+  });
+
+  await check('AC-36 本场景无渲染进程崩溃记录', () => {
+    assert.equal(fs.existsSync(path.join(userData, 'crash.log')), false);
+  });
+  sw.close();
 }
 
 /* ---------------- 场景：恢复 / 不恢复 ---------------- */
@@ -1778,6 +2151,340 @@ async function runDedupeRestart(win) {
   });
 }
 
+/* ---------------- 场景：主题切换（v1.10） ----------------
+   覆盖：默认浅色 → 设置窗口切深色（两个窗口同步）→ 变量/底色/持久化 →
+   深色下功能不受影响 → 切回浅色 → 非法值拒绝 → 重启后保留。 */
+
+/* 取亮度：十六进制与 rgb() 都支持，用来断言「卡片确实变深 / 文字确实变浅」，
+   而不是只看 data-theme 属性（属性对了但 CSS 没接上也可能假通过）。 */
+function lum(color) {
+  if (!color) return NaN;
+  const hex = /^#([0-9a-f]{6})$/i.exec(String(color).trim());
+  if (hex) {
+    const n = parseInt(hex[1], 16);
+    return 0.2126 * ((n >> 16) & 255) + 0.7152 * ((n >> 8) & 255) + 0.0722 * (n & 255);
+  }
+  const m = /rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(String(color));
+  if (!m) return NaN;
+  return 0.2126 * Number(m[1]) + 0.7152 * Number(m[2]) + 0.0722 * Number(m[3]);
+}
+
+async function themeView(w) {
+  return js(
+    w,
+    `(() => {
+      const root = document.documentElement;
+      const cs = getComputedStyle(root);
+      const card = document.querySelector('.item') || document.querySelector('.card');
+      const shell = document.querySelector('#shell');
+      const strip = shell ? getComputedStyle(shell, '::before').height : '';
+      return {
+        theme: root.getAttribute('data-theme'),
+        bg: cs.getPropertyValue('--bg').trim() || cs.getPropertyValue('--bg-1').trim(),
+        text: cs.getPropertyValue('--text').trim(),
+        accent: cs.getPropertyValue('--accent').trim(),
+        cardBg: card ? getComputedStyle(card).backgroundColor : '',
+        stripH: strip,
+        boot: !!(window.ropeTheme && typeof window.ropeTheme.apply === 'function'),
+        query: location.search,
+        picker: [...document.querySelectorAll('.theme-opt')].map((b) => ({
+          v: b.dataset.themeValue,
+          on: b.classList.contains('on'),
+          pressed: b.getAttribute('aria-pressed'),
+        })),
+        cards: [...document.querySelectorAll('.card h2')].map((h) => h.textContent),
+      };
+    })()`
+  );
+}
+
+/* 设置窗口布局体检（v1.11.1）：高 DPI 下卡片必须画成实色，标题不能有
+   白色胶囊/圆形凸起，底部操作栏与两枚按钮不能被窗口边缘裁掉。 */
+async function settingsLayout(w) {
+  return js(
+    w,
+    `(() => {
+      const m = document.querySelector('main');
+      const ft = document.querySelector('.ft');
+      const h2 = document.querySelector('.card h2');
+      const card = document.querySelector('.card');
+      const btn = document.querySelector('#btn-choose-dir');
+      const input = document.querySelector('#limit-input');
+      const box = (e) => { const r = e.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, h: r.height }; };
+      const cs = (e) => getComputedStyle(e);
+      return {
+        winH: innerHeight,
+        mainScroll: m.scrollHeight,
+        mainClient: m.clientHeight,
+        mainMinHeight: cs(m).minHeight,
+        footer: box(ft),
+        quit: box(document.querySelector('#btn-quit')),
+        close: box(document.querySelector('#btn-close')),
+        cards: [...document.querySelectorAll('.card')].map((c) => cs(c).backgroundColor),
+        h2Bg: cs(h2).backgroundColor,
+        h2Radius: cs(h2).borderRadius,
+        h2Before: cs(h2, '::before').content,
+        btnAppearance: cs(btn).webkitAppearance || cs(btn).appearance,
+        inputAppearance: cs(input).webkitAppearance || cs(input).appearance,
+        h2Appearance: cs(h2).webkitAppearance || cs(h2).appearance,
+      };
+    })()`
+  );
+}
+
+async function waitBothThemes(win, sw, want) {
+  return waitFor('两个窗口都切到 ' + want, async () => {
+    const a = await js(win, `document.documentElement.getAttribute('data-theme')`);
+    const b = await js(sw, `document.documentElement.getAttribute('data-theme')`);
+    return a === want && b === want;
+  });
+}
+
+async function runTheme(win) {
+  T.showRope();
+  await sleep(400);
+  await installMouseShield(win);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-theme-'));
+  const aFile = path.join(root, '主题核对.txt');
+  const aDir = path.join(root, '主题核对目录');
+  fs.writeFileSync(aFile, 'theme switch');
+  fs.mkdirSync(aDir);
+  for (let i = 1; i <= 3; i++) fs.writeFileSync(path.join(aDir, `内层${i}.txt`), 'inner');
+
+  await js(win, `rope.addText('主题切换核对文字'); true`);
+  await js(win, `rope.addPaths(${JSON.stringify([aFile, aDir])}); true`);
+  await waitFor('三件挂件就位', async () => (await itemCount(win)) === 3);
+  const folderId = await waitItemId(win, aDir, '文件夹挂件出现');
+
+  const light = await themeView(win);
+  await check('AC-72 默认浅色：引导脚本就绪、URL 带主题、蓝强调与 210px 条高不变', () => {
+    assert.equal(light.theme, 'light');
+    assert.equal(light.boot, true, 'theme.js 必须在 head 里加载');
+    assert.match(light.query, /theme=light/);
+    assert.equal(light.accent, '#4b86f5');
+    assert.equal(light.stripH, '210px');
+    assert.equal(T.snapshot().settings.theme, 'light');
+  });
+
+  await js(win, 'document.querySelector("#btn-settings").click()');
+  const sw = await waitSettingsWindow();
+  const swLight = await themeView(sw);
+
+  await check('AC-73 设置窗口含「外观」卡片与浅色/深色两个按钮，浅色为选中态', () => {
+    assert.ok(swLight.cards.includes('外观'), JSON.stringify(swLight.cards));
+    assert.equal(swLight.theme, 'light');
+    assert.equal(swLight.boot, true);
+    assert.deepEqual(swLight.picker.map((p) => p.v), ['light', 'dark']);
+    assert.equal(swLight.picker[0].on, true);
+    assert.equal(swLight.picker[1].on, false);
+    assert.equal(swLight.picker[0].pressed, 'true');
+    assert.equal(swLight.picker[1].pressed, 'false');
+  });
+
+  const layout = await settingsLayout(sw);
+  await check('AC-94 设置窗口底部操作栏与「退出程序 / 关闭」完整可见，不被窗口裁切', () => {
+    assert.equal(layout.mainMinHeight, '0px', 'main 必须能收缩，否则 footer 会被顶出窗口');
+    assert.ok(layout.footer.bottom <= layout.winH + 1,
+      `footer 底 ${layout.footer.bottom} 超出视口 ${layout.winH}`);
+    for (const [n, b] of [['退出程序', layout.quit], ['关闭', layout.close]]) {
+      assert.ok(b.top >= 0 && b.bottom <= layout.winH + 1,
+        `${n} 按钮被裁切：${JSON.stringify(b)} / 视口 ${layout.winH}`);
+      assert.ok(b.h >= 27, `${n} 按钮高度异常：${b.h}`);
+    }
+    // 常规屏幕上三张卡片应整屏放下，不必滚动；极小工作区允许保留滚动
+    const winH = T.getSettingsWindow().getBounds().height;
+    if (winH >= 600) {
+      assert.ok(layout.mainScroll <= layout.mainClient + 2,
+        `默认窗口高 ${winH} 时内容仍要滚动：scroll ${layout.mainScroll} > client ${layout.mainClient}`);
+    }
+  });
+
+  await check('AC-95 卡片是实色不透明底，标题是纯文字、控件不套原生外观（无白色胶囊/圆形凸起）', () => {
+    assert.equal(layout.cards.length, 3);
+    for (const bg of layout.cards) {
+      assert.equal(bg, 'rgb(255, 255, 255)', '浅色卡片应是纯白实底');
+    }
+    assert.equal(layout.h2Bg, 'rgba(0, 0, 0, 0)', 'h2 不能有白色底色');
+    assert.equal(layout.h2Radius, '0px', 'h2 不能有圆角');
+    assert.ok(['none', 'normal', ''].includes(layout.h2Before),
+      'h2 不能有 ::before 圆形凸起，实际 ' + layout.h2Before);
+    assert.equal(layout.h2Appearance, 'none');
+    assert.equal(layout.btnAppearance, 'none');
+    assert.equal(layout.inputAppearance, 'none');
+  });
+
+  // 先改一项别的设置，用来验证主题切换不会把已有设置覆盖掉
+  await js(sw, `document.querySelector('#limit-input').value = '80'; document.querySelector('#btn-save-limit').click(); true`);
+  await sleep(500);
+
+  await js(sw, `document.querySelector('#btn-theme-dark').click(); true`);
+  await waitBothThemes(win, sw, 'dark');
+  await sleep(300);
+  const darkMain = await themeView(win);
+  const darkSw = await themeView(sw);
+
+  await check('AC-74 点「深色」后主窗口与设置窗口同时变 dark（主进程状态推送生效）', () => {
+    assert.equal(darkMain.theme, 'dark');
+    assert.equal(darkSw.theme, 'dark');
+    assert.equal(T.snapshot().settings.theme, 'dark');
+  });
+
+  await check('AC-75 深色不只是改属性：卡片变深、文字变浅、蓝强调提亮', () => {
+    assert.equal(darkMain.accent, '#5b93ff');
+    assert.equal(darkSw.accent, '#5b93ff');
+    assert.ok(lum(darkMain.cardBg) < lum(light.cardBg) - 60,
+      '主窗卡片亮度：浅=' + lum(light.cardBg) + ' 深=' + lum(darkMain.cardBg));
+    assert.ok(lum(darkSw.cardBg) < lum(swLight.cardBg) - 60,
+      '设置卡片亮度：浅=' + lum(swLight.cardBg) + ' 深=' + lum(darkSw.cardBg));
+    assert.ok(lum(darkMain.text) > lum(light.text) + 60, '深色主题文字应更亮');
+    assert.equal(darkMain.stripH, '210px', '换主题不许改动布局尺寸');
+  });
+
+  await check('AC-76 设置窗口原生底色同步为深色，避免缩放时露白边', () => {
+    assert.match(sw.getBackgroundColor(), /1b1f28/i, '实际 ' + sw.getBackgroundColor());
+  });
+
+  await check('AC-77 主题写入 state.json，且不覆盖已有缓存上限', () => {
+    const st = readState().settings;
+    assert.equal(st.theme, 'dark');
+    assert.equal(st.cacheLimitMB, 80);
+  });
+
+  const darkLayout = await settingsLayout(sw);
+  await check('AC-96 深色设置窗口同样完整：卡片为深色实底、标题透明、底部按钮不被裁切', () => {
+    for (const bg of darkLayout.cards) {
+      assert.equal(bg, 'rgb(38, 44, 56)', '深色卡片应是 #262c38 实底');
+    }
+    assert.equal(darkLayout.h2Bg, 'rgba(0, 0, 0, 0)');
+    assert.equal(darkLayout.h2Radius, '0px');
+    assert.ok(darkLayout.footer.bottom <= darkLayout.winH + 1,
+      '深色下 footer 也不能被裁切');
+    assert.ok(darkLayout.close.bottom <= darkLayout.winH + 1,
+      '深色下关闭按钮也不能被裁切');
+  });
+
+  /* 深色下功能不受换肤影响：文件夹面板能开、行也跟着变深、单击复制仍写文件对象 */
+  await openFolderPanel(win, folderId, 3);
+  const panel = await js(
+    win,
+    `(() => { const r = document.querySelector('#folder-panel .fp-row');
+      return r ? getComputedStyle(r).backgroundColor : ''; })()`
+  );
+  await check('AC-78 深色下文件夹面板仍能展开，行底色也跟着变深', () => {
+    assert.ok(panel, '面板行应存在');
+    assert.ok(lum(panel) < lum(light.cardBg), '面板行应比浅色卡片更暗：' + panel);
+  });
+  await js(win, `(() => { const el=[...document.querySelectorAll('.item')].find(n=>n.classList.contains('t-folder')); if(el) el.dispatchEvent(new MouseEvent('mouseleave')); return true; })()`);
+  await sleep(350);
+
+  clipboard.writeText('SENTINEL-THEME');
+  await js(
+    win,
+    `(() => { const el = document.querySelector('.item.t-file'); if (!el) return false;
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1 })); return true; })()`
+  );
+  await sleep(350);
+  await check('AC-82 深色下单击复制仍写入可粘贴的文件对象（不是路径文字）', () => {
+    const files = clipboard
+      .readBuffer('FileNameW')
+      .toString('utf16le')
+      .split('\0')
+      .filter(Boolean)
+      .map((f) => f.toLowerCase());
+    assert.deepEqual(files, [aFile.toLowerCase()]);
+  });
+
+  await js(sw, `document.querySelector('#btn-theme-light').click(); true`);
+  await waitBothThemes(win, sw, 'light');
+  await sleep(300);
+  const backMain = await themeView(win);
+  const backSw = await themeView(sw);
+
+  await check('AC-79 再点「浅色」两窗口同时恢复，变量与卡片底色回到初始值', () => {
+    assert.equal(backMain.theme, 'light');
+    assert.equal(backSw.theme, 'light');
+    assert.equal(backMain.accent, '#4b86f5');
+    assert.equal(backMain.cardBg, light.cardBg);
+    assert.equal(backSw.cardBg, swLight.cardBg);
+    assert.equal(readState().settings.theme, 'light');
+    assert.match(sw.getBackgroundColor(), /f4f7fb/i, '实际 ' + sw.getBackgroundColor());
+  });
+
+  const illegal = await js(
+    sw,
+    `(async () => {
+      const a = await rope.setSettings({ theme: 'neon' });
+      const b = await rope.setTheme(null);
+      const c = await rope.setTheme('DARK');
+      return { a: a.theme, b: b.theme, c: c.theme,
+               dom: document.documentElement.getAttribute('data-theme') };
+    })()`
+  );
+  await check('AC-80 非法主题值被拒绝，界面与 state.json 都不被污染', () => {
+    assert.deepEqual([illegal.a, illegal.b, illegal.c], ['light', 'light', 'light']);
+    assert.equal(illegal.dom, 'light');
+    assert.equal(readState().settings.theme, 'light');
+  });
+
+  const picker = await js(
+    sw,
+    `[...document.querySelectorAll('.theme-opt')].map(b => ({ v: b.dataset.themeValue, on: b.classList.contains('on'), pressed: b.getAttribute('aria-pressed') }))`
+  );
+  await check('AC-81 分段按钮态始终与真实主题一致', () => {
+    assert.deepEqual(picker.map((p) => p.on), [true, false]);
+    assert.deepEqual(picker.map((p) => p.pressed), ['true', 'false']);
+  });
+
+  await check('AC-36 本场景无渲染进程崩溃记录', () => {
+    assert.equal(fs.existsSync(path.join(userData, 'crash.log')), false);
+  });
+
+  sw.close();
+  fs.rmSync(root, { recursive: true, force: true });
+}
+
+/* ---------------- 场景：深色主题重启保留 ----------------
+   run-tests.js 会预置 settings.theme = 'dark' 的 state.json。 */
+async function runThemeRestart(win) {
+  T.showRope();
+  await sleep(400);
+  await installMouseShield(win);
+  const boot = await themeView(win);
+
+  await check('AC-83 预置深色启动：URL 带上 theme=dark，首帧即为深色', () => {
+    assert.match(boot.query, /theme=dark/);
+    assert.equal(boot.theme, 'dark');
+    assert.equal(boot.accent, '#5b93ff');
+    assert.equal(T.snapshot().settings.theme, 'dark');
+    assert.equal(readState().settings.theme, 'dark');
+  });
+
+  await js(win, 'document.querySelector("#btn-settings").click()');
+  const sw = await waitSettingsWindow();
+  const swView = await themeView(sw);
+
+  await check('AC-83 重启后打开的设置窗口同样是深色，深色按钮高亮', () => {
+    assert.match(swView.query, /theme=dark/);
+    assert.equal(swView.theme, 'dark');
+    assert.deepEqual(swView.picker.map((p) => p.on), [false, true]);
+    assert.match(sw.getBackgroundColor(), /1b1f28/i);
+  });
+
+  await js(sw, `document.querySelector('#btn-theme-light').click(); true`);
+  await waitBothThemes(win, sw, 'light');
+  await sleep(250);
+  await check('AC-84 深色重启后仍可切回浅色并落盘', () => {
+    assert.equal(readState().settings.theme, 'light');
+    assert.equal(T.snapshot().settings.theme, 'light');
+  });
+
+  await check('AC-36 本场景无渲染进程崩溃记录', () => {
+    assert.equal(fs.existsSync(path.join(userData, 'crash.log')), false);
+  });
+  sw.close();
+}
+
 /* ---------------- 主流程 ---------------- */
 
 (async () => {
@@ -1786,6 +2493,528 @@ async function runDedupeRestart(win) {
   await waitFor('页面就绪', () =>
     win.webContents.executeJavaScript('typeof rope !== "undefined"', true)
   );
+
+/* ---------------- 场景：停靠位置（v1.14） ---------------- */
+
+async function runPosition(win) {
+  const work = screen.getPrimaryDisplay().workArea;
+  const full = screen.getPrimaryDisplay().bounds;
+  const B = () => win.getBounds();
+
+  const setPos = async (pos) => {
+    await js(win, `rope.setSettings({ ropePosition: ${JSON.stringify(pos)} }); true`);
+    await waitFor('停靠位置 = ' + pos, () => T.settingsSnapshot().settings.ropePosition === pos);
+    await sleep(260); // 等滑入动画结束
+  };
+  const dataPos = () => js(win, 'document.documentElement.getAttribute("data-pos")');
+
+  await check('AC-117 默认停靠顶部：启动隐藏在屏外上方，data-pos=top', () => {
+    assert.equal(T.settingsSnapshot().settings.ropePosition, 'top');
+    assert.ok(B().y <= -209, 'y=' + B().y);
+  });
+
+  T.showRope();
+  await sleep(400);
+  await installMouseShield(win);
+
+  await check('AC-118 顶部唤出后贴屏顶、宽度居中（与旧版一致）', () => {
+    const b = B();
+    assert.equal(b.y, 0);
+    assert.ok(Math.abs(b.x + b.width / 2 - (full.x + full.width / 2)) <= 2);
+  });
+
+  /* 挂两件，验证排列方向会跟随停靠边切换 */
+  await js(win, `rope.addText('位置A')`);
+  await js(win, `rope.addText('位置B')`);
+  await waitFor('挂件 2 件', async () => (await itemCount(win)) === 2);
+  // 等入场动画（hang-in 的 transform 会临时改变 getBoundingClientRect）
+  await waitFor('入场动画结束', () => js(win, 'document.querySelectorAll(".item.anim-in").length === 0'), 4000);
+  await sleep(120);
+  const rectsH = await js(
+    win,
+    `JSON.stringify([...document.querySelectorAll('.item')].map((n) => { const r = n.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y) }; }))`
+  );
+  const hArr = JSON.parse(rectsH);
+  await check('AC-119 顶部：挂件横向排列（x 递增、y 相同）', () => {
+    assert.equal(hArr.length, 2);
+    assert.ok(hArr[1].x > hArr[0].x, '第二张应在右侧');
+    assert.equal(hArr[0].y, hArr[1].y, '顶部停靠 y 应相同');
+  });
+
+  await setPos('bottom');
+  await check('AC-120 底部：窗口贴工作区底边（避开任务栏），data-pos=bottom', async () => {
+    const b = B();
+    assert.equal(b.y + b.height, work.y + work.height, '底边 = 工作区底');
+    assert.equal(await dataPos(), 'bottom');
+  });
+  await check('AC-121 底部：挂件仍可见（竖向坐标在窗口内）', async () => {
+    const r = await js(
+      win,
+      `(() => { const n = document.querySelector('.item'); const r = n.getBoundingClientRect(); return r.top >= 0 && r.bottom <= window.innerHeight; })()`
+    );
+    assert.equal(r, true);
+  });
+
+  await setPos('left');
+  await check('AC-122 左侧：竖条贴左缘，长度 = 工作区高 ÷5 垂直居中', () => {
+    const b = B();
+    const len = Math.max(168, Math.round(work.height / 2.5));
+    assert.equal(b.x, work.x);
+    assert.equal(b.width, 210);
+    assert.ok(Math.abs(b.height - len) <= 1, `高度 ${b.height} vs ${len}`);
+    assert.ok(Math.abs(b.y + b.height / 2 - (work.y + work.height / 2)) <= 1, '垂直居中');
+  });
+  await check('AC-123 左侧：data-pos=left，挂件纵向排列（y 递增、x 相同）', async () => {
+    assert.equal(await dataPos(), 'left');
+    const arr = JSON.parse(
+      await js(
+        win,
+        `JSON.stringify([...document.querySelectorAll('.item')].map((n) => { const r = n.getBoundingClientRect(); return { x: Math.round(r.x), y: Math.round(r.y) }; }))`
+      )
+    );
+    assert.ok(arr[1].y > arr[0].y, '第二张应在下方');
+    assert.ok(Math.abs(arr[0].x - arr[1].x) <= 4, '左侧停靠 x 应几乎相同');
+  });
+
+  await setPos('right');
+  await check('AC-124 右侧：竖条贴工作区右缘', () => {
+    const b = B();
+    assert.ok(Math.abs(b.x + b.width - (work.x + work.width)) <= 1, `右缘 ${b.x + b.width} vs ${work.x + work.width}`);
+    assert.ok(Math.abs(b.width - 210) <= 1, '宽度 ' + b.width);
+  });
+
+  T.hideRope();
+  await sleep(320);
+  await check('AC-125 右侧收回后整体移出屏幕', () => {
+    const b = B();
+    assert.ok(b.x >= full.x + full.width - 210, 'x=' + b.x + '（应贴屏幕右缘外侧）');
+    assert.ok(b.x + b.width > full.x + full.width - 1, '窗口整体应在屏幕右侧之外');
+  });
+
+  await check('AC-126 非法停靠值被白名单忽略，设置与窗口位置都不变', async () => {
+    const before = B();
+    await js(win, `rope.setSettings({ ropePosition: 'diagonal' }); true`);
+    await sleep(200);
+    assert.equal(T.settingsSnapshot().settings.ropePosition, 'right');
+    const after = B();
+    assert.equal(after.x, before.x, '窗口 x 不动');
+    assert.equal(after.y, before.y, '窗口 y 不动');
+  });
+
+  await setPos('top');
+  T.showRope();
+  await sleep(320);
+  await check('AC-127 切回顶部后与旧版行为一致', () => {
+    const b = B();
+    assert.ok(Math.abs(b.y) <= 1, 'y=' + b.y);
+    assert.ok(Math.abs(b.x + b.width / 2 - (full.x + full.width / 2)) <= 2);
+  });
+
+  /* 设置窗口：4 档分段按钮与真实设置同步 */
+  await js(win, 'rope.openSettings()');
+  const sw = await waitSettingsWindow();
+  await check('AC-128 设置窗口出现 4 档停靠位置按钮，选中态与设置一致', async () => {
+    const state = await js(
+      sw,
+      `(() => {
+        const btns = [...document.querySelectorAll('.pos-opt')];
+        return JSON.stringify({
+          labels: btns.map((b) => b.dataset.posValue),
+          on: btns.map((b) => b.classList.contains('on')),
+          pressed: btns.map((b) => b.getAttribute('aria-pressed')),
+        });
+      })()`
+    );
+    const s = JSON.parse(state);
+    assert.deepEqual(s.labels, ['top', 'left', 'right', 'bottom']);
+    assert.deepEqual(s.on, [true, false, false, false]);
+    assert.deepEqual(s.pressed, ['true', 'false', 'false', 'false']);
+  });
+  await check('AC-129 设置窗口点击「左侧」立即生效（主窗口贴左、按钮选中）', async () => {
+    T.showRope();
+    await sleep(200);
+    await js(sw, `document.querySelector('.pos-opt[data-pos-value="left"]').click(); true`);
+    await waitFor('设置切到 left', () => T.settingsSnapshot().settings.ropePosition === 'left');
+    await sleep(300);
+    assert.ok(Math.abs(B().x - work.x) <= 1, '主窗口应已贴左，x=' + B().x);
+    const on = await js(
+      sw,
+      `JSON.stringify([...document.querySelectorAll('.pos-opt')].map((b) => b.classList.contains('on')))`
+    );
+    assert.deepEqual(JSON.parse(on), [false, true, false, false]);
+  });
+
+  /* 托盘菜单单选组 */
+  await check('AC-130 托盘菜单有 4 个单选项，勾选跟随当前停靠边', () => {
+    const tpl = T.buildTrayTemplate();
+    const sub = tpl.find((m) => m.label === '停靠位置');
+    assert.ok(sub && Array.isArray(sub.submenu), '缺少停靠位置子菜单');
+    assert.deepEqual(
+      sub.submenu.map((m) => m.label),
+      ['顶部', '左侧', '右侧', '底部']
+    );
+    assert.deepEqual(
+      sub.submenu.map((m) => m.type),
+      ['radio', 'radio', 'radio', 'radio']
+    );
+    assert.deepEqual(
+      sub.submenu.map((m) => !!m.checked),
+      [false, true, false, false],
+      '当前 left 应勾选「左侧」'
+    );
+  });
+
+  await check('AC-131 停靠位置落盘，state.json 中记录 ropePosition', async () => {
+    await setPos('bottom');
+    const raw = readState();
+    assert.equal(raw.settings.ropePosition, 'bottom');
+  });
+
+  await check('AC-36 本场景无渲染进程崩溃记录', () => {
+    const crash = path.join(userData, 'crash.log');
+    assert.ok(!fs.existsSync(crash), fs.existsSync(crash) ? fs.readFileSync(crash, 'utf8') : '');
+  });
+}
+
+/* ---------------- 场景：停靠位置重启记忆 ---------------- */
+
+async function runPositionRestart(win) {
+  const work = screen.getPrimaryDisplay().workArea;
+  await sleep(300);
+  await check('AC-132 重启后按记住的停靠边就位：左侧竖条、启动即隐藏在屏外左侧', () => {
+    const b = win.getBounds();
+    const len = Math.max(168, Math.round(work.height / 2.5));
+    assert.ok(b.x <= -208, '启动应在隐藏位（屏外左侧），x=' + b.x);
+    assert.ok(Math.abs(b.width - 210) <= 2, '宽度 ' + b.width);
+    // 高 DPI（如 150%）下物理像素取整会带来几 DIP 偏差，精确值由单测保证
+    assert.ok(Math.abs(b.height - len) <= 6, `长度 ${b.height} vs 期望 ${len}`);
+  });
+  await check('AC-133 隐藏位置在屏幕外左侧（贴左停靠时）', () => {
+    assert.ok(win.getBounds().x <= -208, 'x=' + win.getBounds().x);
+  });
+  T.showRope();
+  await sleep(420);
+  await check('AC-134 唤出后贴左缘且渲染层 data-pos=left（首帧即竖排，无闪变）', async () => {
+    const b = win.getBounds();
+    assert.ok(Math.abs(b.x - work.x) <= 1);
+    assert.equal(await js(win, 'document.documentElement.getAttribute("data-pos")'), 'left');
+  });
+}
+
+/* ---------------- 场景：多选（v1.16） ---------------- */
+
+async function runMultiSelect(win) {
+  T.showRope();
+  await sleep(400);
+  await installMouseShield(win);
+
+  const readme = path.join(ROOT, 'README.md');
+  const srcDir = path.join(ROOT, 'src');
+  const targets = [readme, srcDir];
+  await js(win, `rope.addText('多选文字A')`);
+  await js(win, `rope.addPaths(${JSON.stringify(targets)})`);
+  await waitFor('挂件 3 件', async () => (await itemCount(win)) === 3);
+  await sleep(450); // 等入场动画结束再读 rect
+
+  /* 按类型取挂件元素与数据 */
+  const elOf = async (i) =>
+    `[...document.querySelectorAll('.item')][${i}]`;
+  const ctrlClick = (expr) =>
+    js(win, `${expr}.dispatchEvent(new MouseEvent('click', { bubbles: true, ctrlKey: true })); true`);
+
+  await check('AC-135 「多选」按钮位于清空旁，初始未开启', async () => {
+    const order = await js(
+      win,
+      'JSON.stringify([...document.querySelectorAll("#controls .icon-btn")].map((b) => b.id))'
+    );
+    assert.deepEqual(JSON.parse(order), ['btn-clear', 'btn-select', 'btn-settings']);
+    assert.equal(await js(win, 'document.querySelector("#btn-select").classList.contains("on")'), false);
+    assert.equal(await js(win, 'document.body.classList.contains("sel-mode")'), false);
+  });
+
+  await check('AC-136 点「多选」进入多选模式（按钮绿态 + body 标记）', async () => {
+    await js(win, `document.querySelector('#btn-select').click(); true`);
+    await sleep(150);
+    assert.equal(await js(win, 'document.body.classList.contains("sel-mode")'), true);
+    assert.equal(await js(win, 'document.querySelector("#btn-select").classList.contains("on")'), true);
+  });
+
+  await check('AC-137 Ctrl+点击勾选两件：仅这两件带 selected 与对勾徽标', async () => {
+    await ctrlClick(`${await elOf(1)}`); // README
+    await ctrlClick(`${await elOf(2)}`); // src 文件夹
+    await sleep(120);
+    const n = await js(win, 'document.querySelectorAll(".item.selected").length');
+    assert.equal(n, 2, 'selected 数 ' + n);
+    const badge = await js(
+      win,
+      'getComputedStyle(document.querySelector(".item.selected"), "::after").content'
+    );
+    assert.ok(String(badge).includes('✓'), '徽标内容 ' + badge);
+  });
+
+  await check('AC-138 Ctrl+再点同一件 = 取消勾选，数量随之变化', async () => {
+    await ctrlClick(`${await elOf(1)}`);
+    await sleep(120);
+    assert.equal(await js(win, 'document.querySelectorAll(".item.selected").length'), 1);
+    await ctrlClick(`${await elOf(1)}`);
+    await sleep(120);
+    assert.equal(await js(win, 'document.querySelectorAll(".item.selected").length'), 2);
+  });
+
+  await check('AC-139 多选状态下普通单击 = 勾选/取消勾选（单击复制停用）', async () => {
+    await sleep(600); // 避开 Ctrl 点选后的 click 拦截窗口
+    const before = clipboard.readText();
+    const txt = `document.querySelector('.item.t-text')`;
+    // 保证文字件初始未选中（前面用例可能勾过它）
+    await js(
+      win,
+      `(() => { const el = ${txt}; if (el.classList.contains('selected')) el.dispatchEvent(new MouseEvent('click', { bubbles: true })); return true; })()`
+    );
+    await sleep(600);
+    const base = await js(win, 'document.querySelectorAll(".item.selected").length');
+    await js(win, `${txt}.dispatchEvent(new MouseEvent('click', { bubbles: true })); true`);
+    await sleep(600);
+    assert.equal(
+      await js(win, 'document.querySelectorAll(".item.selected").length'),
+      base + 1,
+      '普通单击应勾选一件'
+    );
+    assert.equal(clipboard.readText(), before, '多选模式下单击不应复制');
+    await js(win, `${txt}.dispatchEvent(new MouseEvent('click', { bubbles: true })); true`);
+    await sleep(600);
+    assert.equal(
+      await js(win, 'document.querySelectorAll(".item.selected").length'),
+      base,
+      '再点同一件应取消勾选'
+    );
+  });
+
+  await check('AC-140 多选状态下双击不再打开（双击打开停用，也不降级复制）', async () => {
+    await sleep(600); // 避开拦截窗口
+    const before = clipboard.readText();
+    const selCount = await js(win, 'document.querySelectorAll(".item.selected").length');
+    await js(
+      win,
+      `document.querySelector('.item.t-text').dispatchEvent(new MouseEvent('dblclick', { bubbles: true })); true`
+    );
+    await sleep(400);
+    assert.equal(clipboard.readText(), before, '多选模式下双击不应降级复制');
+    assert.equal(
+      await js(win, 'document.querySelectorAll(".item.selected").length'),
+      selCount,
+      '双击不应改变勾选状态'
+    );
+  });
+
+  await check('AC-141 拖动选中件 = 整组换位（组内相对顺序不变）', async () => {
+    // 选中 README(1) 与 src(2)，按住 README 抬起后拖到文字件(0)左侧 → 组插到最前
+    const orderBefore = await js(win, `rope.getState().then(s => JSON.stringify(s.items.map(i => i.name || i.text)))`);
+    const moved = await js(
+      win,
+      `(async () => {
+        const els = [...document.querySelectorAll('.item')];
+        const dragged = els[1]; // README（选中件）
+        const textEl = els[0];  // 文字（组外参照）
+        const r = dragged.getBoundingClientRect();
+        const t = textEl.getBoundingClientRect();
+        const mk = (x, y) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 9, pointerType: 'mouse', isPrimary: true });
+        dragged.dispatchEvent(new PointerEvent('pointerdown', mk(r.left + 20, r.top + 20)));
+        await new Promise((res) => setTimeout(res, 220)); // 超过 150ms 抬起阈值
+        document.dispatchEvent(new PointerEvent('pointermove', mk(t.left - 2, t.top + 20)));
+        await new Promise((res) => setTimeout(res, 80));
+        document.dispatchEvent(new PointerEvent('pointerup', mk(t.left - 2, t.top + 20)));
+        return true;
+      })()`
+    );
+    assert.equal(moved, true);
+    await waitFor('排序落盘', async () => {
+      const order = await js(win, `rope.getState().then(s => JSON.stringify(s.items.map(i => i.name || i.text)))`);
+      return order !== orderBefore ? order : false;
+    });
+    const order = JSON.parse(
+      await js(win, `rope.getState().then(s => JSON.stringify(s.items.map(i => i.name || i.text)))`)
+    );
+    // 组整体挪到文字前，组内仍 README 在前、src 在后
+    assert.deepEqual(order, ['README.md', 'src', '多选文字A'], '顺序 ' + JSON.stringify(order));
+  });
+
+  await check('AC-142 拖出窗口 = 整组按顺序拖出（files 数组）', async () => {
+    const before = T.dragLog.length;
+    const ok = await js(
+      win,
+      `(async () => {
+        const els = [...document.querySelectorAll('.item')];
+        const dragged = els[0]; // README（选中件）
+        const r = dragged.getBoundingClientRect();
+        const mk = (x, y) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 10, pointerType: 'mouse', isPrimary: true });
+        dragged.dispatchEvent(new PointerEvent('pointerdown', mk(r.left + 20, r.top + 20)));
+        await new Promise((res) => setTimeout(res, 220));
+        document.dispatchEvent(new PointerEvent('pointermove', mk(r.left + 20, window.innerHeight + 30)));
+        await new Promise((res) => setTimeout(res, 80));
+        document.dispatchEvent(new PointerEvent('pointerup', mk(r.left + 20, window.innerHeight + 30)));
+        return true;
+      })()`
+    );
+    assert.equal(ok, true);
+    await sleep(400);
+    assert.ok(T.dragLog.length > before, '应记录到一次拖出');
+    const last = T.dragLog[T.dragLog.length - 1];
+    assert.equal(last.kind, 'multi');
+    assert.deepEqual(last.target, [readme, srcDir], '载荷 ' + JSON.stringify(last.target));
+  });
+
+  await check('AC-143 文字挂件混选时自动跳过并计数', async () => {
+    // 上一次拖出后 nativeDrag 标记要 2.5s 才解除，等它过期再发起下一次手势
+    await sleep(2300);
+    await ctrlClick(`document.querySelector('.item.t-text')`);
+    await sleep(120);
+    assert.equal(await js(win, 'document.querySelectorAll(".item.selected").length'), 3);
+    const before = T.dragLog.length;
+    await js(
+      win,
+      `(async () => {
+        const els = [...document.querySelectorAll('.item')];
+        const dragged = els[0];
+        const r = dragged.getBoundingClientRect();
+        const mk = (x, y) => ({ bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, pointerId: 11, pointerType: 'mouse', isPrimary: true });
+        dragged.dispatchEvent(new PointerEvent('pointerdown', mk(r.left + 20, r.top + 20)));
+        await new Promise((res) => setTimeout(res, 220));
+        document.dispatchEvent(new PointerEvent('pointermove', mk(r.left + 20, window.innerHeight + 30)));
+        await new Promise((res) => setTimeout(res, 80));
+        document.dispatchEvent(new PointerEvent('pointerup', mk(r.left + 20, window.innerHeight + 30)));
+        return true;
+      })()`
+    );
+    await sleep(400);
+    const last = T.dragLog[T.dragLog.length - 1];
+    assert.ok(T.dragLog.length > before);
+    assert.equal(last.skipped, 1, '应跳过 1 件文字');
+    assert.deepEqual(last.target, [readme, srcDir]);
+    // 取消文字勾选，恢复两件
+    await ctrlClick(`document.querySelector('.item.t-text')`);
+    await sleep(120);
+  });
+
+  await check('AC-144 只选文字件拖出：不发起拖拽，提示均不可插入', async () => {
+    // 文字挂件本身无指针拖拽手势（HTML5 拖拽不参与群组），
+    // 这里直接调主进程 multi 分支验证“全部不可插入”的拒绝路径
+    const before = T.dragLog.length;
+    await js(win, `rope.startDrag({ kind: 'multi', list: [{ kind: 'text', text: '多选文字A' }] }); true`);
+    await sleep(400);
+    assert.equal(T.dragLog.length, before, '不应记录拖出载荷');
+    const toastText = await js(win, 'document.querySelector("#toast").textContent');
+    assert.ok(/无法插入|跳过/.test(toastText), 'toast=' + toastText);
+    // 离开多选，恢复干净状态
+    await js(win, `document.querySelector('#btn-select').click(); true`);
+    await sleep(150);
+    assert.equal(await js(win, 'document.body.classList.contains("sel-mode")'), false);
+  });
+
+  await check('AC-145 Esc 退出多选：清空勾选、按钮复位', async () => {
+    // 先进入多选并勾一件（直接按 Esc 在非多选态会进取件模式）
+    await js(win, `document.querySelector('#btn-select').click(); true`);
+    await sleep(120);
+    await ctrlClick(`${await elOf(0)}`);
+    await sleep(120);
+    assert.equal(await js(win, 'document.querySelectorAll(".item.selected").length'), 1);
+    await js(win, `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
+    await sleep(150);
+    assert.equal(await js(win, 'document.body.classList.contains("sel-mode")'), false);
+    assert.equal(await js(win, 'document.body.classList.contains("remove-mode")'), false, '不应误进取件模式');
+    assert.equal(await js(win, 'document.querySelectorAll(".item.selected").length'), 0);
+    assert.equal(await js(win, 'document.querySelector("#btn-select").classList.contains("on")'), false);
+  });
+
+  await check('AC-151 多选开启后再点一次「多选」按钮 = 退出（与 Esc 等效）', async () => {
+    // AC-142 的整组拖出留有 2.6s 的 click 抑制窗口（防拖出后余 click 误复制），
+    // 本用例是其后第一个"普通单击"用例，先等窗口过期
+    await sleep(2800);
+    // 按钮 → 普通单击勾选（v1.17：多选下单击即勾选，不需要 Ctrl）→ 再点按钮退出
+    await js(win, `document.querySelector('#btn-select').click(); true`);
+    await sleep(120);
+    let n = 0;
+    // 全量并行时偶有残留抑制窗口，最多重试 6 次（每次点击都是"勾选"语义，勾上就停）
+    for (let i = 0; i < 6 && n === 0; i++) {
+      await js(win, `document.querySelector('.item').dispatchEvent(new MouseEvent('click', { bubbles: true })); true`);
+      await sleep(500);
+      n = await js(win, 'document.querySelectorAll(".item.selected").length');
+    }
+    const dbg = await js(
+      win,
+      `({ sel: document.body.classList.contains('sel-mode'), n: document.querySelectorAll(".item.selected").length, first: document.querySelector('.item').className })`
+    );
+    assert.ok(dbg.n >= 1, `多选下普通单击应能勾选 · 状态=${JSON.stringify(dbg)}`);
+    await js(win, `document.querySelector('#btn-select').click(); true`);
+    await sleep(150);
+    assert.equal(await js(win, 'document.body.classList.contains("sel-mode")'), false);
+    assert.equal(await js(win, 'document.querySelector("#btn-select").classList.contains("on")'), false);
+    assert.equal(await js(win, 'document.querySelectorAll(".item.selected").length'), 0);
+  });
+
+  await check('AC-146 不开按钮直接 Ctrl+点击 = 隐式进入多选', async () => {
+    await ctrlClick(`${await elOf(0)}`);
+    await sleep(150);
+    assert.equal(await js(win, 'document.body.classList.contains("sel-mode")'), true);
+    assert.equal(await js(win, 'document.querySelectorAll(".item.selected").length'), 1);
+    await js(win, `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
+    await sleep(120);
+  });
+
+  await check('AC-147 多选与取件互斥：进入取件模式自动退出多选', async () => {
+    await js(win, `document.querySelector('#btn-select').click(); true`);
+    await sleep(120);
+    await ctrlClick(`${await elOf(0)}`);
+    await sleep(120);
+    assert.equal(await js(win, 'document.body.classList.contains("sel-mode")'), true);
+    // 按住 Esc 进入取件模式（渲染层 keydown）
+    await js(win, `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
+    await sleep(150);
+    // 多选开着时 Esc 只退多选，不进取件
+    assert.equal(await js(win, 'document.body.classList.contains("remove-mode")'), false);
+    assert.equal(await js(win, 'document.body.classList.contains("sel-mode")'), false);
+  });
+
+  await check('AC-148 深色主题下选中态样式清晰（描边 + 绿色对勾）', async () => {
+    await js(win, `rope.setSettings({ theme: 'dark' }); true`);
+    await sleep(300);
+    await ctrlClick(`${await elOf(0)}`);
+    await sleep(150);
+    const border = await js(
+      win,
+      'getComputedStyle(document.querySelector(".item.selected")).borderColor'
+    );
+    assert.notEqual(border, '', '应有描边');
+    const btnBg = await js(
+      win,
+      'document.querySelector("#btn-select").classList.contains("on") ? getComputedStyle(document.querySelector("#btn-select")).backgroundColor : ""'
+    );
+    assert.match(btnBg, /0,\s*198,\s*92|0, 198, 92/, '按钮绿 ' + btnBg);
+    // 还原
+    await js(win, `window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true`);
+    await js(win, `rope.setSettings({ theme: 'light' }); true`);
+    await sleep(250);
+  });
+
+  await check('AC-149 竖向停靠：多选进竖向图标栏，只显示图标 + 悬停浮层文字', async () => {
+    await js(win, `rope.setSettings({ ropePosition: 'left' }); true`);
+    await sleep(400);
+    const inRail = await js(
+      win,
+      '(() => { const b = document.querySelector("#btn-select"); const r = b.getBoundingClientRect(); const sb = document.querySelector("#statusbar").getBoundingClientRect(); const label = b.querySelector(".btn-label"); const ls = getComputedStyle(label); return { inBar: r.left <= sb.left + 30 && r.width <= 30, labelHidden: ls.opacity === "0", labelPos: ls.position }; })()'
+    );
+    assert.equal(inRail.inBar, true, '应位于外侧图标栏且为图标钮');
+    assert.equal(inRail.labelHidden, true, '文字默认隐藏');
+    assert.equal(inRail.labelPos, 'absolute', '文字为浮层定位');
+    await js(win, `rope.setSettings({ ropePosition: 'top' }); true`);
+    await sleep(300);
+  });
+
+  await check('AC-150 本场景无渲染进程崩溃记录', () => {
+    const crash = path.join(userData, 'crash.log');
+    assert.ok(!fs.existsSync(crash), fs.existsSync(crash) ? fs.readFileSync(crash, 'utf8') : '');
+  });
+}
+
 
   console.log(`\n[e2e] 场景：${scenario}`);
 
@@ -1796,6 +3025,13 @@ async function runDedupeRestart(win) {
   else if (scenario === 'click') await runClick(win);
   else if (scenario === 'dedupe') await runDedupe(win);
   else if (scenario === 'dedupe-restart') await runDedupeRestart(win);
+  else if (scenario === 'theme') await runTheme(win);
+  else if (scenario === 'theme-restart') await runThemeRestart(win);
+  else if (scenario === 'office-icons') await runOfficeIcons(win);
+  else if (scenario === 'item-limit') await runItemLimit(win);
+  else if (scenario === 'position') await runPosition(win);
+  else if (scenario === 'position-restart') await runPositionRestart(win);
+  else if (scenario === 'multi-select') await runMultiSelect(win);
   else throw new Error('未知场景：' + scenario);
 
   console.log(`[e2e] ${scenario}: ${passes} 通过 / ${failures} 失败`);

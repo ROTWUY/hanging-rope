@@ -97,6 +97,34 @@ if (only === 'all' || only === 'e2e') {
   e2e('shortcut', {});
   e2e('click', {});
   e2e('dedupe', {});
+  e2e('theme', {});
+  e2e('office-icons', {});
+  e2e('item-limit', {});
+
+  // 停靠位置场景：四向切换 / 布局方向 / 设置页与托盘入口 / 白名单 / 落盘
+  e2e('position', {});
+
+  // 停靠位置重启记忆：预置 settings.ropePosition = 'left'，
+  // 验证启动即按记住的边就位、隐藏位置在屏外、data-pos 首帧即 left。
+  const posDir = mkUserData('position-restart');
+  fs.writeFileSync(
+    path.join(posDir, 'state.json'),
+    JSON.stringify({ version: 1, items: [], settings: { ropePosition: 'left' } }, null, 2)
+  );
+  e2e('position-restart', {}, posDir);
+
+  // 多选场景（v1.16）：按钮 / Ctrl 点选 / 单击双击语义 / 整组排序 /
+  // 整组拖出（files 数组 + 跳过计数）/ Esc 退出 / 互斥 / 竖向图标栏
+  e2e('multi-select', {});
+
+  // 深色主题重启场景：预置 settings.theme = 'dark' 的 state.json，
+  // 验证主进程把主题带进 loadFile 的 query、首帧不闪浅色。
+  const themeDir = mkUserData('theme-restart');
+  fs.writeFileSync(
+    path.join(themeDir, 'state.json'),
+    JSON.stringify({ version: 1, items: [], settings: { theme: 'dark' } }, null, 2)
+  );
+  e2e('theme-restart', { HANGING_ROPE_RESTORE_ANSWER: 'discard' }, themeDir);
 
   // 启动自愈场景：预置旧版本 state.json（含 3 组重复挂件），验证重启后合并
   const dupDir = mkUserData('dedupe-restart');

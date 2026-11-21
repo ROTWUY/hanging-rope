@@ -1,7 +1,7 @@
 {
   "name": "hanging-rope",
   "productName": "悬挂绳",
-  "version": "0.1.0",
+  "version": "1.18.0",
   "description": "悬挂绳 —— 常驻屏幕顶端的文件中转站，拖上去挂着，用的时候拖下来。",
   "main": "src/main/main.js",
   "author": "local",
@@ -12,30 +12,47 @@
     "test": "node test/run-tests.js",
     "test:unit": "node test/run-tests.js unit",
     "test:e2e": "node test/run-tests.js e2e",
-    "dist": "electron-builder --win --x64"
+    "dist": "electron-builder --win --x64",
+    "dist:portable": "electron-builder --win portable --x64",
+    "pack": "electron-builder --dir --win --x64"
   },
   "devDependencies": {
-    "electron": "^33.2.1"
+    "@resvg/resvg-js": "^2.6.2",
+    "electron": "^33.2.1",
+    "electron-builder": "^26.18.0"
   },
   "build": {
     "appId": "com.local.hangingrope",
-    "productName": "HangingRope",
+    "productName": "悬挂绳",
+    "asar": true,
     "files": [
       "src/**/*",
       "assets/**/*",
       "package.json"
     ],
+    "directories": {
+      "output": "dist"
+    },
     "win": {
       "target": [
         "nsis",
         "portable"
       ],
-      "icon": "assets/icon.png"
+      "icon": "assets/icon.png",
+      "legalTrademarks": "本地工具，无第三方商标"
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": false,
       "allowToChangeInstallationDirectory": true,
-      "shortcutName": "悬挂绳"
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "悬挂绳",
+      "artifactName": "悬挂绳-安装版-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "悬挂绳-免安装-${version}.${ext}",
+      "requestExecutionLevel": "user"
     }
   }
 }

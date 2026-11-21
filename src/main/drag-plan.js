@@ -54,4 +54,22 @@ function planDrag(payload, deps) {
   };
 }
 
-module.exports = { planDrag, DANGLING_LNK_WARNING };
+/**
+ * v1.16 多选整组拖出：逐项套用单件规则，保持传入顺序；
+ * 不可插入的对象（文字 / 源丢失等）自动跳过并计数，由调用方提示。
+ * @param {Array<{kind?:string,path?:string,cachePath?:string}>} list
+ * @param {{exists:Function,stat:Function,resolveShortcut:Function,imageIconFor?:Function}} deps
+ * @returns {{ok:boolean,targets:string[],skipped:number}}
+ */
+function planMultiDrag(list, deps) {
+  const targets = [];
+  let skipped = 0;
+  for (const payload of list || []) {
+    const plan = planDrag(payload, deps);
+    if (plan.ok) targets.push(plan.target);
+    else skipped++;
+  }
+  return { ok: targets.length > 0, targets, skipped };
+}
+
+module.exports = { planDrag, planMultiDrag, DANGLING_LNK_WARNING };

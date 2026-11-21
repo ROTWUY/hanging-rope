@@ -115,7 +115,7 @@
 
 ### P6 排序与防闪烁（功能已实现）
 
-- ✅ 按住 150ms 抬起（放大 + 金色描边 + 投影）；横向拖动实时换位；松手提交并持久化
+- ✅ 按住 150ms 抬起（放大 + 蓝色描边 + 投影）；横向拖动实时换位；松手提交并持久化
 - ✅ 向下拖出窗口底边才转为对外拖出
 - ✅ 入场动画只挂在新挂件（`anim-in`，动画结束移除）；排序期间禁用过渡 → 修复闪烁
 - ✅ **测试**：E2E 合成 pointerdown → 150ms → 多次 pointermove，采样每步 `opacity`（必须恒为 1）与 `el.getAnimations().length`（必须为 0），并断言 DOM 顺序随指针变化、pointerup 后 `state.json` 顺序一致
@@ -198,7 +198,7 @@
 
 - ✅ **P15-1** `main.js` 新增 `openSettingsWindow()`：真正的 `BrowserWindow`（`frame:true` / `resizable` / `minimizable` / `skipTaskbar:false` / `alwaysOnTop:false`），居中于主屏工作区，`titleBar` 为系统原生（右上角关闭按钮）。已打开时只 `show()+focus()` 并推送一次刷新，不会开出第二个。
 - ✅ **P15-2** 新增 IPC `open-settings`、`settings:info`（设置 + 缓存占用 + 挂件数 + 复制模式）、`settings:clear-all`；`sendState()` 末尾统一 `notifySettings()`，挂件/缓存放生变化时设置窗口自动刷新；目录选择框的父窗口改为设置窗口（打开时）。
-- ✅ **P15-3** 新增 `src/renderer/settings.html` + `settings.css` + `settings.js`：深色双卡片（图片缓存 / 悬挂绳），路径单独占行不再被按钮挤成省略号，占用用进度条表示，底部"退出程序 / 关闭"。Esc 可关（输入框聚焦时先失焦，不误关）。
+- ✅ **P15-3** 新增 `src/renderer/settings.html` + `settings.css` + `settings.js`：浅色双卡片（图片缓存 / 悬挂绳），路径单独占行不再被按钮挤成省略号，占用用进度条表示，底部"退出程序 / 关闭"。Esc 可关（输入框聚焦时先失焦，不误关）。
 - ✅ **P15-4** 删除绳索内的 `#settings-panel` 及其样式与 `openSettings/closeSettings/fillSettings` 逻辑；状态栏「设置」改为 `rope.openSettings()`；托盘「设置」直接开窗（不再先唤出绳索）；顺带清掉 `EXPANDED_HEIGHT` 常量与不再使用的 `fmtSize`。
 - ✅ **P15-5** 修复过程中踩到的坑：`settings.js` 里写 `const rope = window.rope` 会与 contextBridge 定义的全局绑定重名，整段脚本 `Identifier 'rope' has already been declared` 直接不执行（页面全是"—"）。改为直接使用全局 `rope`。
 
@@ -218,7 +218,7 @@
 - ✅ **P16-1** 新增 `src/main/paths.js`：`pathKey / samePath` 纯函数（小写 + 正斜杠 + 去末尾分隔符 + 盘符根补斜杠），用于判断"这个目标是不是已经在绳上了"。
 - ✅ **P16-2** `main.js` 新增 `pinPath(raw)`：解 `.lnk` → `stat` 校验（不存在则返回 `missing`）→ 路径去重（已在绳上返回 `already`）→ 否则按拖入同一套字段 `addItem` 并 `sendState()`；新增 IPC `pin-path`（invoke，返回结果给渲染层提示）。
 - ✅ **P16-3** `preload.js` 暴露 `rope.pinPath(path)`。
-- ✅ **P16-4** 渲染层：目录行右侧追加 `.fp-pin`（文件行追加同宽 `.fp-pin-slot` 占位，保证缩略图纵向对齐）；点击后 toast「已固定：xxx」/「已经在绳上了」，并把 📌 切成金色 `on` 态；面板保持打开可连续钉。
+- ✅ **P16-4** 渲染层：目录行右侧追加 `.fp-pin`（文件行追加同宽 `.fp-pin-slot` 占位，保证缩略图纵向对齐）；点击后 toast「已固定：xxx」/「已经在绳上了」，并把 📌 切成蓝色 `on` 态；面板保持打开可连续钉。
 - ✅ **P16-5** 手势隔离：📌 上 `pointerdown` 即 `stopPropagation()`，行拿不到按下事件 → 不会启动"按住行拖动＝拖出"；`click` 也 `stopPropagation()`，不干扰行的选中逻辑。
 - ✅ **P16-6** 视觉细节：面板宽度 300 → 332（给 📌 让位，避免文件名被挤成省略号）；emoji 📌 静息态 `grayscale+brightness` 去色成灰钉，悬停/已固定恢复原色，避免三行红点抢视觉。
 
@@ -228,7 +228,7 @@
 - ✅ E2E `basic` 6 项：文件夹行有 📌 而文件行只有占位（含右端间距 ≤12px、垂直偏差 ≤2px）、按 📌 拖动不产生拖出载荷、点 📌 新增文件夹挂件且路径/名称正确、📌 变 `on`、面板不关闭、再点不重复且提示文案。
 - ✅ 反向验证：①把 `pinPath` 的去重判断去掉 → AC-45「不重复添加」失败；②去掉 📌 上的 `pointerdown stopPropagation` → AC-46「不应产生拖出载荷」失败。两处均已还原。
 - ⚠️ 过程中发现 AC-46 一开始是"假通过"：上一步 AC-17 的拖出会把渲染层的 `ui.nativeDrag` 置真 2.5 秒，这期间行的按下事件被直接忽略，于是无论有没有拦截都拖不出去。已改为先等 2.5 秒再做探针，反向验证才真正失败。
-- ✅ 视觉验证：隔离环境截图确认三行排布、灰钉与已固定金色态（`.test/pin-panel.png`、`.test/pin-done.png`）。
+- ✅ 视觉验证：隔离环境截图确认三行排布、灰钉与已固定蓝色态（`.test/pin-panel.png`、`.test/pin-done.png`）。
 
 ### P17 📌 再点一次取消固定（v1.4）
 
@@ -253,7 +253,7 @@
 - ✅ E2E `basic` 59 → 62 项：把原「再点不重复添加，只提示已经在绳上了」按新需求改为 AC-47「再点 = 取消固定」，新增 AC-48「取消后可重新固定且始终只有一件」、AC-49「从别处取下后 📌 自动熄灭」、AC-50「多份等价变体一次摘净」。**原"不重复添加"的要求没有删除**，改由 AC-48 的固定 → 取消 → 固定循环继续守着。
 - ✅ 反向验证：①去掉 `onState` 里的 `syncPinButtons()` → AC-49 失败（61 通过 / 1 失败）；②把 `unpinPath` 改成只删 `matches[0]` → AC-50 失败「两份应被一次摘净」（61 通过 / 1 失败）。两处均已还原，加固测试代码后又各重跑一次，结论不变。
 - ✅ **稳定性加固（本轮踩坑）**：连续跑全量套件时，basic 里靠"固定 `sleep(700)` + 取最后一个 folder 挂件"定位面板偶发失准 —— 状态推送慢会定位到错误的文件夹，宿主真实光标掠过触发 `mouseleave` 又会在 260ms 后按设计收起面板，曾出现 10 项连带假失败（第一次全绿、第二次 10 失败）。改为：`waitItemId()` 按路径等挂件出现、`openFolderPanel()` 按 `data-id` 精确锁定并条件等待面板展开、AC-50 用 `waitFor` 等两份变体挂件到位；再加 `installMouseShield()` **只拦授信（真实）鼠标边界事件**，合成事件 `isTrusted=false` 仍完整走产品逻辑；AC-49 等待期间模拟"鼠标停在面板上"（产品本来就不收起）。**断言标准一条未改，产品代码未因此改动**；加固后 `npm test` 连续三次全绿（当时共 120 项）。
-- ✅ 交互细节：按钮 `title` 随状态在「固定到绳上」与「取消固定（已在绳上）」之间切换；金色 `on` 态语义从"只提示"改为"可再点取消"（`styles.css` 注释同步）。
+- ✅ 交互细节：按钮 `title` 随状态在「固定到绳上」与「取消固定（已在绳上）」之间切换；蓝色 `on` 态语义从"只提示"改为"可再点取消"（`styles.css` 注释同步）。
 
 ### P18 单击复制 / 双击打开（v1.5）
 
@@ -485,7 +485,7 @@ npm run test:e2e  # 只跑 Electron 场景
 - `src/main/main.js` + `src/preload/preload.js` + `src/renderer/app.js` + `styles.css`（P16）：`pinPath` 与 IPC `pin-path`、面板行内 📌（含占位、手势隔离、`on` 态）、面板宽度 332。
 - `src/main/paths.js`（P17）：新增 `pinnedItems(items, p)`，固定去重与取消摘除共用同一套归一化判定。
 - `src/main/main.js` + `src/preload/preload.js`（P17）：`unpinPath` 与 IPC `unpin-path`、`rope.unpinPath`；`pinPath` 改用 `pinnedItems`。
-- `src/renderer/app.js` + `styles.css`（P17）：`applyPinVisual / syncPinButton / syncPinButtons`、📌 点击按固定态切换 pin/unpin、`onState` 状态校准、`data-path`、金色态注释语义更新。
+- `src/renderer/app.js` + `styles.css`（P17）：`applyPinVisual / syncPinButton / syncPinButtons`、📌 点击按固定态切换 pin/unpin、`onState` 状态校准、`data-path`、蓝色态注释语义更新。
 - `test/unit/paths.test.js`（P17）：新增 `pinnedItems` 5 项单测（等价变体、类型过滤、多份全返回、前缀不误命中、非法输入）。
 - `test/e2e/scenarios.js`（P17）：新增 AC-47~50 四条用例；新增 `waitItemId / openFolderPanel / installMouseShield` 三个辅助，文件夹面板定位由"最后一个 folder 挂件 + 固定 sleep"改为按 id 精确定位 + 条件等待；收尾清理路径比较改为大小写不敏感。
 - 新增 `src/main/item-action.js`（P18）：`planCopy / planOpen / fileNameWBuffer` 纯函数，挂件与面板行共用。
@@ -503,3 +503,113 @@ npm run test:e2e  # 只跑 Electron 场景
 ### 6.4 仍需人工验收的 7 条
 
 见第 3 节"手工清单"。这些依赖真实鼠标/真实第三方窗口，自动化无法替代；建议按清单逐条点一遍，尤其"拖文件进微信""拖行内容进微信""更换缓存目录""网页图片拖入"四项。
+
+---
+
+## 7. 后续增量（2026-11-15 ~ 11-16）
+
+### P21 打包为 Windows EXE（2026-11-15，已完成）
+
+- `electron-builder@26` 配 `nsis` + `portable` 两个目标，产物在 `dist/`（免安装单文件 / 安装版），命令与产物说明见 README「打包成 EXE」。
+- 打包态专属修复：`app.getAppPath()` 指向 `app.asar` 时 `nativeImage.createFromPath` 读不到图标，改用 `fs.readFileSync` + `createFromBuffer`（`src/main/main.js` 新增 `appAssetImage`）。
+- `build.productName` 保持「悬挂绳」，与源码态共用 `%APPDATA%\悬挂绳`，原有挂件不丢。
+- 验证：`app.asar` 只含源码 / 图标 / package.json；CDP 连到 portable EXE 确认渲染层与 `window.rope` 全接口可用、无 crash.log；`npm test` 180 项全绿。
+
+### P22 界面风格改为浅色蓝白（2026-11-16，已完成）
+
+- 需求：用户提供一张浅色卡片式剪贴板工具截图，要求换成那种风格配色。
+- 取色结论：背景 `#f0f0f0` / `#f8f8f8`、卡片纯白、文字近黑 `#1f2329`、主按钮亮蓝约 `#4a86e8`；大圆角、细描边、淡阴影、无渐变。
+- `src/renderer/styles.css` / `settings.css` 整体重写配色变量与视觉细节，深色金绳主题全部替换为浅色蓝白；`scripts/gen-icons.js` 重画蓝底白绳图标并重新生成 `assets/icon.png` / `tray.png`。
+- **约束保持**（改色不改结构）：`#shell::before` 仍固定 210px、卡片 86×104 / 图片 120×124、文件夹面板 332px 三行、📌 24×24、文字预览 `-webkit-line-clamp: 6`、入场动画只挂 `.anim-in`、`body.reordering` 禁过渡、取件模式 `::after` content 仍为「取下」。
+- 文档同步：PRD 升 v1.9（AC 编号与验收标准不变，仅把「金色 / 深色」描述改为「蓝色 / 浅色」），README 新增「界面风格」小节。
+- 验证：`npm test` 180 项全绿 + 真机截屏核对浅色效果；EXE 重新打包，成品与源码一致。
+
+### P23 第二款主题：深色 + 设置里自由切换（2026-11-16，已完成）
+
+- 需求：在 P22 的浅色蓝白之外再做一款对应的深色主题，用户可在设置中自由选择切换。
+- **数据层**（`src/main/store.js`）：`DEFAULT_SETTINGS.theme = 'light'`；`THEMES` 白名单 + `normalizeTheme()`；`load()` 对脏值归一、`setSettings()` 只接受 `light`/`dark`；与缓存上限等设置合并写入，互不覆盖。
+- **主进程**（`src/main/main.js`）：`win.loadFile` / `settingsWin.loadFile` 都带 `query: { theme }`，让首帧就确定主题；`THEME_NATIVE_BG` 让设置窗口原生底色跟随主题；`notifySettings()` 同步 `setBackgroundColor()`；主题变更经既有 `settings:set` → `sendState()` 广播到两个窗口。`preload.js` 新增 `setTheme()` 便捷接口。
+- **渲染层**：新增 `src/renderer/theme.js`（两个 HTML 在 `<head>` 同步引入，读 query 写 `<html data-theme>`，暴露 `ropeTheme.apply()`）；`app.js` 的 `onState` / 启动 `getState` 调 `applyThemeFromState()`；`settings.html` 新增「外观」卡片与浅色/深色分段按钮；`settings.js` 点击先本地预览再经 IPC 持久化并校准按钮态。
+- **CSS**：`styles.css` / `settings.css` 把 36 处硬编码浅色收进 CSS 变量（浅色取值逐项保持原样），末尾追加 `:root[data-theme="dark"]` 只覆写颜色变量。**不改任何尺寸、圆角、行数、动画与交互选择器**，所以 P22 记下的约束（210px 条高、卡片 86×104 / 图片 120×124、面板 332px 三行、📌 24×24、文字 6 行截断、排序禁过渡）全部保留。
+- **验收**：新增单元测试 5 项（默认值 / 白名单 / 持久化 / 脏值归一 / 与其它设置合并）；新增 E2E 场景 `theme`（12 项）与 `theme-restart`（4 项），覆盖双窗口联动、CSS 变量与卡片亮度、窗口原生底色、持久化、深色下文件夹面板与单击复制、非法值拒绝、重启首帧不闪白。PRD 升 v1.10，新增 3.6「主题与配色」、2.6「切换主题」与 Q 章 AC-72~AC-84。
+- **反向验证**：① 让 `ropeTheme.apply()` 永远返回 `light` → `theme` 场景因「等待两个窗口变 dark」超时而失败；② 删掉 `styles.css` 的深色变量块 → `AC-75 卡片/文字亮度` 断言失败。两处均按预期抓到，随后自动还原。
+- **验证**：连续三次 `npm test` 全绿；真机截浅色/深色主界面与设置窗口共 4 张图核对；EXE 重新打包，成品内 `theme.js` / 双主题 CSS 与源码一致。
+
+### P24 Office 文档换成 Word / Excel / PowerPoint 应用图标（2026-11-16，已完成）
+
+- 需求：用户给出三张新版 Microsoft 365 桌面图标截图，希望 Word / Excel / PowerPoint 文档挂上绳后就用这三款图标，不再是通用白纸 + `DOCX` 文字卡。
+- **素材**：`assets/office-word.svg` / `office-excel.svg` / `office-powerpoint.svg`，纯 SVG 自绘（渐变主体 + 左下角白字字母徽标），未使用任何官方素材。截图里左下角的白底蓝箭头是 Windows 桌面**快捷方式角标**，不属于应用图标，未画进去。
+- **映射**：`app.js` 新增 `OFFICE_ICON` + `OFFICE_EXT`（`doc/docx/docm/dot/dotx/dotm` → Word；`xls/xlsx/xlsm/xlsb/xlt/xltx/xltm` → Excel；`ppt/pptx/pptm/pps/ppsx/ppsm/pot/potx/potm` → PowerPoint），`officeKind()` 只按扩展名判断、大小写无关。WPS / `.rtf` / `.csv` / `.odt` 不在表内。
+- **渲染**：抽出 `docShape()` / `officeShape()` 两个小工具，`buildThumb()`（绳上卡片）与文件夹面板行都改走同一套；`officeShape()` 给 `<img>` 挂 `error` 回退，资源缺失时静默换回通用文档形状，不留破图标。图标 `alt=""`、`draggable=false`、`pointer-events:none`，不干扰按住拖动 / 排序 / 拖出。
+- **CSS**：`styles.css` 新增 `.office-icon { width/height: 44px; object-fit: contain; }`。浅色 / 深色两套主题共用同一份彩色 SVG，不加滤镜；`.item`（86×104）、`.thumb`（54px 高）、`.fp-row-thumb`（46px）尺寸一律未动。
+- **约束保持**：纯展示层改动 —— `state.json` 结构、去重、单击复制、双击打开、拖出、排序、📌、手势、名称行全部不变；旧数据零迁移。
+- **验收**：新增 E2E 场景 `office-icons`（9 项，AC-85~AC-93），覆盖三款图标与大小写扩展名、SVG 真实加载（`naturalWidth > 0`）、非 Office 文件仍用文字卡、卡片尺寸 / 名称行、装饰属性、文件夹面板行、深色主题可见性、加载失败回退。`npm test` 全绿：**76 单测 + 134 E2E = 210 项**。PRD 升 v1.11（新增 3.7、R 章、暂不做项与附录说明），README 同步。
+- **打包**：`assets/**/*` 已在 `build.files` 白名单内，无需改打包配置；重新生成 EXE 后需核对 `app.asar` 含三份 SVG 且发布态能正常加载。
+
+### P25 修复高 DPI 下设置窗口的 UI 显示错误（2026-11-16，已完成）
+
+- 用户截图（913×804，正好是 620×570 窗口在 150% 缩放下的物理尺寸）：三张白卡底色完全没画出来、卡片标题「外观 / 图片缓存 / 悬挂绳」旁出现白色圆形凸起（像开关胶囊）、左下角多一个无标签白色控件、底部「退出程序 / 关闭」被窗口边缘裁掉半截。
+- **复现结论**：用 `--force-device-scale-factor=1.5` 启动源码态 + CDP 取计算样式，当前代码在同一缩放下白卡、纯蓝标题、footer 都正常 —— 说明是特定机器/渲染路径下的**样式兜底不足**，不是结构错误。逐像素比对截图确认整片背景都是 `--bg` 的 `#f4f7fb`，`.card` 的 `background` 与 `border` 没生效，但 `.btn` 的白底生效。
+- **修复**（`src/renderer/settings.css`）：
+  - `main` 补 `min-height: 0`。flex 子项默认 `min-height:auto`，内容一高就不肯收缩，会把 footer 顶出窗口；配合已有 `overflow-y:auto` 让它自己滚。
+  - `.card` 在 `var(--card)` 前加一层 `#ffffff` 实色兜底，`border` 同理加 `#e3e8f0` 兜底；变量没解析成功时卡片仍是可辨认的白卡，深色主题下 `var(--card)` 照常覆盖。
+  - `.card h2` 显式 `background: transparent; border: 0; border-radius: 0; -webkit-appearance: none`，杜绝标题被画成胶囊 / 带圆形凸起。
+  - `.btn` / `#limit-input` 加 `-webkit-appearance: none; appearance: none`，不让 Chromium 原生控件外观叠加出自绘样式；`.btn` 的 `transition: all` 收敛成 `color / border-color / background` 三项，减少不必要的合成层。
+- **窗口尺寸**（`src/main/main.js`）：设置窗口高 `570 → min(640, workArea.height - 40)`（下限 520）。三张卡片 + 头部 + footer 的自然高度约 600 DIP，旧值会把「绳上挂件」整行挤进滚动区；按工作区兜底，小屏幕也不会把窗口顶出屏幕。
+- **验收**：`theme` 场景新增 AC-94~96 共 3 项 —— footer 与两枚底部按钮完整在视口内、`main.min-height === 0px`、常规屏高下 `scrollHeight <= clientHeight`；浅色卡片纯白实底 / 深色 `#262c38` 实底、h2 透明无圆角无 `::before`、三类控件 `appearance:none`。`npm test` **76 单测 + 137 E2E = 213 项全绿**。PRD 升 v1.11.1（S 章）、README 测试数 210→213。
+- **视觉核对**：150% DPI 浅色下重截设置窗口，三张白卡、纯蓝标题、「绳上挂件 / 清空全部挂件」整行、底部两枚按钮全部完整，无白色圆形凸起与空白控件；`main.scrollHeight === clientHeight === 501`，footer 底 606 ≤ 视口 605（1px 取整）。打包版需再按 100% / 150%、浅色 / 深色复核。
+
+### P26 可调节挂件件数上限（2026-11-17，已完成）
+
+- **背景**：用户问「只存路径是不是能挂无限个」，实测 5 档容量压测（`.test/capacity-bench.cjs` 可复现）：约 236 字节/件，1000 件 `render()` 16.2ms 刚好压满 60fps 帧预算，3000 件加一件 75ms，1 万件加一件 1088ms；内存不是瓶颈（1 万件 JS 堆 14.7MB），先崩的是横向滚动找东西的交互。结论：默认 300 作软护栏，不做 `MAX_ITEMS` 硬拒之外的任意数值。
+- **数据层**（`src/main/store.js`）：`ITEM_LIMITS = [200, 300, 350, 400, 450, 500]`、`DEFAULT_ITEM_LIMIT = 300`；`DEFAULT_SETTINGS` 加 `itemLimit`；`load()` 与 `getSettings()` 都过 `normalizeItemLimit()`；`setSettings()` 只认白名单数字，字符串 `'350'` / `null` / 越界一律忽略；`addItem()` 最后一道兜底 `state.items.length >= limit → return null`，任何调用路径都绕不过去。新增 7 项单测（83 项全绿）。
+- **主进程**（`src/main/main.js`）：`itemLimit() / freeSlots() / limitText() / warnLimit()`；`addPaths()` 先判重再占名额，批量挂到 `slots` 耗尽为止，`opts.report({added, skipped, blocked})` 供剪贴板监听汇总；`pinPath()` 满额返回 `{ok:false, reason:'limit', message}`；`addTextItem()` / `addImageBuffer()`（在**写缓存之前**拦）/ `addImageFromUrl()`（在**联网下载之前**拦）/ `hangFromClipboard()`（轮询静默、`onPastePressed` 主动给一次提示）。设置窗口高 `640 → min(700, workArea - 40)` 容纳新增一行。
+- **设置页**：`settings.html` 在「悬挂绳」卡片加 6 档分段按钮 + `#limit-note`；`settings.css` 复用 `.theme-opt` 样式（`.limit-opt` 收窄到 38px 保证 6 档一行）；`settings.js` 渲染选中态 / `aria-pressed` / 「当前 N 件 / 上限 M 件」与超限时标红说明；`preload.js` 暴露 `setItemLimit()`，复用既有 `settings:set` 白名单与广播，没加新 IPC 通道。
+- **三个取舍**：① 上限是**硬拦截**（满了不再添加）而非只提示；② 下拉里**保留 300**，否则改过一次就选不回默认值；③ 调低上限**不删已有挂件**，只拦新增。
+- **验收**：新增 `item-limit` E2E 场景 14 项（AC-104~116），覆盖默认档 / 白名单 / 批量部分放行 / 满额各入口拦截 / 图片不留孤儿缓存 / 轮询不刷屏 / 调高恢复 / 调低不删 / 非法值 / 主题互不覆盖 / 设置页 UI / 深色选中态 / 布局不溢出。`npm test` **83 单测 + 151 E2E = 234 项全绿**。
+- **顺手修的测试竞态**：`office-icons` 场景原来在 DOM 出现后立刻取 `naturalWidth`，全量连跑时偶发 3 项假失败；现在先等 6 张卡片 SVG 与 3 张面板 SVG 全部 `complete && naturalWidth > 0` 再断言。另修正两处时序断言：`state.json` 有 150ms 防抖、按钮选中态有 140ms 背景过渡，都改成 `waitFor` 等稳定再读。
+- **文档**：PRD 升 v1.12（2.7 使用说明、3.8 规格、F2/F10、第 5 章不做项、T 章 AC-97~116、第 7 章风险 8、附录 `settings.itemLimit`）；README 测试数 213→234、使用方法加一行、已知限制补一条。
+
+### P27 绳子四向停靠：顶部 / 左侧 / 右侧 / 底部（2026-11-17，已完成）
+
+- **需求**（用户确认「完全适配边缘」形态）：绳子默认贴屏幕顶部，用户可选左侧 / 右侧 / 底部；左右为竖绳贴边、挂件朝屏幕内侧挂，底部横绳贴底、挂件向上挂；唤出/收回手感跟随停靠边；记住选择；设置页 + 托盘菜单双入口。
+- **几何**（`src/main/geometry.js`）：新增 `POSITIONS` 白名单 + `normalizePosition()`；`computeRopeBounds(displayBounds, workArea, thickness, pos)` 返回 `{shown, hidden}` 两套 bounds —— 顶部沿用整屏宽度 ÷3 居中贴屏顶（与旧 `computeWindowBounds` 结果一致，旧接口保留）；底部 / 左右按 workArea（避开任务栏），左右长度 = 工作区高 ÷3 垂直居中；隐藏位统一挪到整屏外（连任务栏区域也不挡鼠标）。`isEdgeHit()` 四向热区（贴边窄带，深入任务栏不算命中），旧 `isTopEdgeHit` 保留。
+- **数据**（`store.js`）：`ROPE_POSITIONS` 白名单、`DEFAULT_SETTINGS.ropePosition='top'`、load 归一、setSettings 只认 4 个方位。
+- **主进程**（`main.js`）：`ropePos/ropeThickness/ropeGeom` 取代 `winX/winW/ropeHeight`；`computeRopeGeometry()` + `animateBounds()`（x/y 单轴插值）取代 `animateY()`；showRope/hideRope/set-height（四向下分别为加高或加宽）全部走新几何；边缘轮询 `isEdgeHit` 按当前边；`applyRopePosition()` 切换即时生效（可见态滑到新边、隐藏态直接放到新边的屏外位）+ `refreshTrayMenu()`；`settings:set` 检测 ropePosition 变化自动应用；托盘菜单加「停靠位置」radio 子菜单；`loadFile` query 加 `pos` 防首帧闪布局；`__test` 暴露 `applyRopePosition/buildTrayTemplate`。
+- **渲染层**：`index.html` 把绳 + 挂件区包进 `#body` 方向容器；`theme.js` 扩展为按 URL query 引导 `data-pos`（首帧即正确布局）；`styles.css` 加四套 `html[data-pos]` 规则 —— 底部整条镜像（背景圆角朝上 / 状态栏在下 / 挂件朝上 / 动画与悬停反向）、左右竖绳 + 纵向滚动 + 夹子挪到朝绳一侧 + 背景块固定 210px 竖条内侧圆角 + 状态栏可换行；`app.js` `applyPosFromState()` 随状态推送同步、位置变化自动收起展开中的文件夹面板，`positionFolderPanel()` 按方位选择弹出位置（顶部沿用 CSS top、其余 JS 定 left/top）。
+- **设置页**：「悬挂绳」卡片最上加「停靠位置」4 档分段按钮（独立 `.pos-opt` 类，复用 `.seg-opt` 样式——直接复用 `.limit-opt` 会被 item-limit 场景的选择器误抓，读出 NaN）；设置窗口高 700→780 容纳新增行。
+- **验收**：geometry 新增 8 项单测（含「厚度变化只影响厚度方向」与热区边界）；新增 `position` E2E 16 项（AC-117~131：默认顶部 / 四向几何与 data-pos / 排列方向 / 隐藏位 / 非法值 / 设置页与托盘入口 / 落盘）与 `position-restart` 3 项（AC-132~134：预置 left 重启记忆、首帧无闪变）。**91 单测 + 170 E2E = 261 项全绿**。
+- **过程坑**：① 开发机 150% DPI + 任务栏在顶（workArea 1707×1035、y=32），窗口贴边存在 ±1~3px 物理像素取整误差，E2E 几何断言统一带 ±1~6 容差（精确值由单测保证）；② E2E 早期断言在窗口隐藏态读「可见位置」、在入场动画未结束时读 rect，均属测试写法问题，分别改为显式 showRope 与等 `.anim-in` 清空；③ 方格纸背景（v1.13）与四向布局无冲突，`#shell::before` 的 210px 厚度语义在四向下均成立。
+- **文档**：PRD 升 v1.14（2.8 使用说明、3.1/3.2 改写、3.9 规格、F1/F10、第 5 章不做项加「拖拽换边 / 绳长自定义」、U 章 AC-117~134、第 7 章风险 9~10、附录 `ropePosition`）；README 同步。
+
+### P28 多选模式：整组排序 + 整组拖出插入（2026-11-18，已完成）
+
+- **需求**（用户提出，明确两点理念约束）：新增「多选」按钮（清空旁）；多选下单击复制 / 双击打开**语义不变**（仍作用于指针指向的单件）；Ctrl+点击勾选（复用取件模式的手势成果）；拖动选中件整组排序；拖出窗口整组快捷插入 Office / 聊天软件，**按顺序逐一插入、不可插入对象自动跳过**；只发路径引用不复制本体。
+- **渲染层**（`app.js`）：`ui.selMode` + `ui.selected`(Set)；`setSelMode/toggleSelect/selectedEls/itemElById`；Ctrl(⌘)+click 分支先于 clickBlocked（选择不受拦截窗口影响），勾选后 markClickBlocked(400) 防误双击打开；Esc 优先级：文件夹面板 > 退多选 > 进取件；`setRemoveMode(true)` 自动退多选（互斥）；`render()` 清理失效 id、`buildItem` 回放 selected 类；群组手势：`lift()` 对选中件挂 `p.group`（DOM 顺序）整组 lifting，`reorderAtPoint` 支持组插入（锚点=组尾成员的 nextElementSibling 判 no-op），`commitReorder` 清整组类；`belowWindow` 分支组拖时转 `dragOutMulti`（组内逐件收 payload，文字/失效也交给主进程统一跳过）。
+- **主进程**（`drag-plan.js` + `main.js`）：新增 `planMultiDrag(list, deps)` —— 逐项套用 `planDrag`（快捷方式解析 / 图片缓存副本规则全保留），保持顺序收集 `targets`、不可插入项 `skipped` 计数；`startDrag` 识别 `kind='multi'` → `sender.startDrag({ files: targets, icon })` 一次系统拖放带全部文件（插入端按数组顺序逐一插入）；dry-run `dragLog` 记录 `{target: 数组, kind:'multi', skipped}`；跳过计数与"全部不可插入"的 toast 统一在主进程发（渲染层不重复提示）。
+- **UI**：`#btn-select`（复选框图标 + 文字，横向）位于清空与设置之间；开启态与复制即悬挂同款绿色；选中挂件 = 强调色描边 + `--accent-soft` 光圈 + 右上角绿色对勾徽标（::after）；竖向图标栏自动收编（22px 图标钮 + 悬停浮层「多选」）。
+- **验收**：`planMultiDrag` 单测 4 项；`multi-select` E2E 16 项（AC-135~150）。**95 单测 + 186 E2E = 281 项全绿**。
+- **过程坑**：① 文字挂件没有指针拖拽手势（HTML5 拖拽），"只选文字拖出"无法用手势触发，E2E 改为直调 `rope.startDrag({kind:'multi'})` 验证主进程拒绝路径；② 上一轮拖出后 `ui.nativeDrag` 要 2.5s 解除，紧接的 pointerdown 手势会被挡，E2E 场景间需 sleep(2300)；③ 非 multi 选态下按 Esc 会进取件模式，E2E 里 Esc 前必须先确保多选态，否则合成 click 会误删挂件；④ heredoc 写测试文件时 `\\` 会被 shell 吃掉，路径断言要用编辑工具写。
+- **文档**：PRD v1.16（2.9 使用说明、3.x 状态栏、U2 章 AC-135~150、版本行）；README 同步。
+
+### P29 界面质感五项优化 + 多选交互修订（2026-11-21，已完成）
+
+- **背景**：用户要求按 Apple 设计原则从「排印 / 视觉层级 / 留白 / 材质 / 空间一致性」五个角度体检界面，列出 3~5 个最影响质感的问题，确认后全改；随后又修订多选交互（规划变更）并把取件角标改「×」。
+- **体检结论（5 条按优先级）**：① 字号碎片化（11 档字号、挂件名 10.5px 为全项目第二小）+ 中文小字发虚；② 蓝 / 绿双强调色语义冲突，主窗口与设置窗口的"开启态"颜色不一致；③ 全项目 `backdrop-filter` 使用次数为 0，浮层是"贴纸"不是"材质"；④ 间距 14 种手拍值、无基线，设置卡片顶部 2px、状态栏 26px 死高；⑤ 弹层入场方向固定朝下，与触发源方位脱节，面板顶距硬编码 `top:118px`。
+- **排印**（`styles.css`）：挂件名 `10.5px` → `12px / 500`；文字预览 `9.5px` → `11px`；文档角标、取下角标、面板底注等 9~10px 全部 ≥ 11px；卡片顶距 14 → 12px、缩略图 54 → 50px 防名字变大后溢出。
+- **色彩语义**：规则写进两个 CSS 的文件头注释——**绿 = 开关型开启态、蓝 = 单选选中 / 可交互、红 = 危险**。设置页 `.card h2`、`.fp-counter`、`.fp-foot .key`、footer `.status` 的装饰性蓝降为中性灰。
+- **材质**：`--pop-bg` 0.98 → 0.78 半透明，新增 `--pop-blur` / `--pop-blur-sm` 两档；文件夹面板 / toast / 竖排悬停标签加 `backdrop-filter: blur() saturate()`；`pop-in` 关键帧加 `scale(0.98)`；`@media (prefers-reduced-transparency)` 回退实色。
+- **留白**：`:root` 落 `--sp-1~6` 4px 基线 token；顶部状态栏去掉 `height: 26px` 改内容撑开 + 8px 顶距；竖排 rail 边距 4 → 8px、`#cord` 让位 38 → 48px、`#empty-hint` 34 → 46px。
+- **空间一致性**：`#folder-panel` 的 `pop-in` 拆成四套 `html[data-pos]` 关键帧（从触发卡片那一侧滑入 + scale）；`top: 118px` 收进 `--fp-top`。
+- **多选交互修订**（`app.js`，用户规划变更）：click 处理器加 `ui.selMode` 分支——多选下普通单击 = 勾选（`detail >= 2 || clickBlocked()` 先拦，勾完 `markClickBlocked(400)`）；`dblclick` 加 `if (ui.selMode) return`，多选下双击打开停用；Ctrl 分支保留为独立隐式入口；按钮再点一次 / Esc 退出。
+- **取件角标**：`body.remove-mode .item::after` 的 `content` 由 `"取下"` 改为 `"×"`（13px 加粗）。
+- **验收**：95 单测 + 188 E2E 全绿（新增 AC-151）；截图核对 `.test/ui17-*.png`（顶 / 左 / 深 / 浅 + 设置窗口）。
+- **过程坑**：① 设置页有"默认窗高 782 下内容不滚动"的硬约束（AC-94 / AC-116），首版间距加高 +92px 直接挂 2 项；回调方案是从窗口顶距、标题边距抠回预算，不砍行距。② `.pos-opt` 不能复用 `.limit-opt`，否则被 item-limit 场景的选择器误抓读出 NaN（v1.14 遗留）。③ 截图探针的 electron 必须 `run_in_background` 启动，否则随 shell 一起退出；合成 Esc 事件会留下取件模式残影，不算产品问题。
+
+### P30 侧边停靠竖绳高度改为屏高 1/2.5（2026-11-21，已完成）
+
+- **需求**：用户先要求"侧边高度 315×854"，随即改为"组件高度是屏幕的 1/5"，最后定稿 **1/2.5**。实现只保留最终态，代码中无 315×854 残留。
+- **几何**（`geometry.js`）：`SIDE_LENGTH_DIVISOR` 5 → **2.5**，`computeRopeBounds` 左右分支 `max(SIDE_MIN_LENGTH, round(workArea.height / 2.5))`；`SIDE_MIN_LENGTH` 168 保留（工作区 < 420px 才触发）。顶部 / 底部仍按宽度 ÷3，不受影响。
+- **验收**：单测改为 ÷2.5（1080 工作区 → 432）并把矮屏保底用例改用 400 高屏（400÷2.5 = 160 → 168）；E2E AC-122 / AC-132 的期望公式同步。**96 单测 + 187 E2E = 283 项全绿**；实机截图 `.test/ui17-left-light.png` 核对（150% DPI 下窗高 ≈ 416 DIP，垂直居中、挂件与图标栏均完整）。
+- **顺手修的测试稳定性**：AC-151 在全量并行跑时偶发假失败（前面用例残留的点击抑制窗口），改为最多 6 次轮询重试；AC-143 / AC-145 同类抖动确认是并行资源竞争（单独跑 17/17 全过）。
+- **文档与发布**：PRD 升 v1.18（形态章 / 四向表格 / AC-122）；README 同步 exe 名、测试数、取下角标、停靠位置行、配色语义；新增 `CHANGELOG.md`；版本号 0.1.0 → 1.18.0，产出安装版与免安装版并发布 GitHub Release。

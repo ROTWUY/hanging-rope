@@ -69,6 +69,10 @@ contextBridge.exposeInMainWorld('rope', {
   onSettingsChanged: (cb) => ipcRenderer.on('settings:changed', () => cb()),
   clearAllItems: () => ipcRenderer.invoke('settings:clear-all'),
   setSettings: (patch) => ipcRenderer.invoke('settings:set', patch),
+  /* 主题切换：复用 settings:set 的白名单校验与广播，返回完整设置对象 */
+  setTheme: (theme) => ipcRenderer.invoke('settings:set', { theme }),
+  /* 件数上限切换：同上，返回完整设置对象供渲染层以真实值为准 */
+  setItemLimit: (n) => ipcRenderer.invoke('settings:set', { itemLimit: n }),
   chooseCacheDir: () => ipcRenderer.invoke('settings:choose-cache-dir'),
   cacheUsage: () => ipcRenderer.invoke('cache:usage'),
   clearCache: () => ipcRenderer.invoke('cache:clear'),

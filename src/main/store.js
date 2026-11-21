@@ -34,10 +34,36 @@ function userDataDir() {
 
 const MAX_TEXT_CHARS = 50000; // 单条文字上限（约几十 KB）
 
+/* 主题白名单：只认这两个值，任何脏数据（旧版字段、手改 state.json、
+   非法 IPC 入参）都归一成浅色，绝不把未知字符串写进设置。 */
+const THEMES = ['light', 'dark'];
+function normalizeTheme(v) {
+  return THEMES.includes(v) ? v : 'light';
+}
+
+/* 挂件件数上限（v1.12）：只认这 6 个档位，默认 300。
+   与主题一样，手改 state.json 的脏数据归一为默认值，而非法 IPC 入参
+   在 setSettings 里直接忽略（不覆盖用户已有选择）。 */
+const ITEM_LIMITS = [200, 300, 350, 400, 450, 500];
+const DEFAULT_ITEM_LIMIT = 300;
+function normalizeItemLimit(v) {
+  return ITEM_LIMITS.includes(v) ? v : DEFAULT_ITEM_LIMIT;
+}
+
+/* 停靠位置（v1.14）：只认这 4 个值，默认 top。
+   旧版 state.json 没有该字段 → load 时归一为 top，行为与升级前完全一致。 */
+const ROPE_POSITIONS = ['top', 'left', 'right', 'bottom'];
+function normalizeRopePosition(v) {
+  return ROPE_POSITIONS.includes(v) ? v : 'top';
+}
+
 const DEFAULT_SETTINGS = {
   cacheDir: '', // 空 = 使用默认目录
   cacheLimitMB: 200,
   hotkey: 'CommandOrControl+Alt+H',
+  theme: 'light', // v1.10：浅色为默认，用户可在设置里切到深色
+  itemLimit: DEFAULT_ITEM_LIMIT, // v1.12：绳上挂件数上限，设置里可调
+  ropePosition: 'top', // v1.14：绳子停靠的屏幕边缘
 };
 
 let state = { version: 1, items: [], settings: { ...DEFAULT_SETTINGS } };
@@ -106,6 +132,9 @@ function load() {
       state.items = raw.items.map(sanitizeItem).filter(Boolean);
     }
     state.settings = { ...DEFAULT_SETTINGS, ...(raw.settings || {}) };
+    state.settings.theme = normalizeTheme(state.settings.theme);
+    state.settings.itemLimit = normalizeItemLimit(state.settings.itemLimit);
+    state.settings.ropePosition = normalizeRopePosition(state.settings.ropePosition);
   } catch {
     // 首次运行或文件损坏：使用默认
   }
@@ -222,6 +251,10 @@ function replaceItems(items) {
 }
 
 function addItem(item) {
+  /* 件数上限的最后一道兜底：所有新增入口（拖入 / 剪贴板 / 文字 / 图片 /
+     📌 / 网页图片）最终都落到这里，保证任何路径都绕不过上限。
+     上层负责预先给出友好提示，这里只负责绝不写爆数据。 */
+  if (state.items.length >= normalizeItemLimit(state.settings.itemLimit)) return null;
   state.items.push(item);
   save();
   return item;
@@ -256,7 +289,10 @@ function clearItems() {
 }
 
 function getSettings() {
-  return { ...state.settings, resolvedCacheDir: cacheDir() };
+  const s = { ...state.settings, resolvedCacheDir: cacheDir() };
+  s.itemLimit = normalizeItemLimit(s.itemLimit);
+  s.ropePosition = normalizeRopePosition(s.ropePosition);
+  return s;
 }
 
 function setSettings(patch) {
@@ -264,6 +300,12 @@ function setSettings(patch) {
   if (typeof patch.cacheDir === 'string') allowed.cacheDir = patch.cacheDir.trim();
   if (Number.isFinite(patch.cacheLimitMB)) allowed.cacheLimitMB = Math.max(10, Math.min(4096, patch.cacheLimitMB | 0));
   if (typeof patch.hotkey === 'string' && patch.hotkey) allowed.hotkey = patch.hotkey;
+  // 主题只接受白名单值；非法值直接忽略，不覆盖已有选择
+  if (patch.theme === 'light' || patch.theme === 'dark') allowed.theme = patch.theme;
+  // 件数上限同理：只认 6 个数字档位，字符串 / 越界 / null 一律忽略
+  if (ITEM_LIMITS.includes(patch.itemLimit)) allowed.itemLimit = patch.itemLimit;
+  // 停靠位置同理：只认 4 个方位，非法值忽略
+  if (ROPE_POSITIONS.includes(patch.ropePosition)) allowed.ropePosition = patch.ropePosition;
   state.settings = { ...state.settings, ...allowed };
   save();
   return getSettings();
@@ -395,6 +437,13 @@ function getState() {
 module.exports = {
   MAX_TEXT_CHARS,
   DEFAULT_SETTINGS,
+  THEMES,
+  normalizeTheme,
+  ITEM_LIMITS,
+  DEFAULT_ITEM_LIMIT,
+  normalizeItemLimit,
+  ROPE_POSITIONS,
+  normalizeRopePosition,
   userDataDir,
   load,
   save,

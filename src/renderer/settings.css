@@ -1,17 +1,30 @@
 /* 悬挂绳 —— 设置窗口样式
-   独立普通窗口（系统标题栏），内容区是深色卡片列表。 */
+   独立普通窗口（系统标题栏），与主界面同一套浅色蓝白语言：
+   浅灰底 + 白色卡片 + 深灰文字 + 亮蓝主按钮。
+   色彩语义（v1.17，两窗口统一）：绿色 = 开关型开启态；蓝色 = 单选选中 / 可交互；
+   红色 = 危险与警告。其余文字一律灰阶，不做装饰性用色。 */
 
 :root {
-  --bg: #15171c;
-  --card: rgba(255, 255, 255, 0.04);
-  --card-line: rgba(255, 255, 255, 0.08);
-  --line: rgba(255, 255, 255, 0.09);
-  --text: #e8ecf4;
-  --text-dim: #a3adbf;
-  --text-faint: #6f7889;
-  --amber: #e2a34a;
-  --amber-soft: #f3c983;
+  /* 浅色蓝白为默认；深色只覆写这批颜色变量，布局与控件尺寸完全不动。 */
+  --bg: #f4f7fb;
+  --card: #ffffff;
+  --card-line: #e3e8f0;
+  --line: #e6eaf1;
+  --text: #1f2430;
+  --text-dim: #5f6875;
+  --text-faint: #98a1ae;
+  --accent: #4b86f5;
+  --accent-strong: #2f6fe0;
+  --accent-soft: #eaf1ff;
   --danger: #e2604a;
+  --danger-soft: #fff1ee;
+  --danger-text: #c94e38;
+  --danger-hover: #ffe5df;
+  --ctrl-bg: #ffffff;
+  --row-line: #eef1f6;
+  --scroll-thumb: #d5dce8;
+  --bar-bg: #e9edf4;
+  --card-shadow: 0 2px 8px rgba(31, 41, 61, 0.05);
 }
 
 * {
@@ -39,26 +52,31 @@ body {
   height: 100%;
   display: flex;
   flex-direction: column;
-  padding: 18px 20px 0;
+  padding: 14px 20px 0;
 }
 
 /* ---------- 头部 ---------- */
 
 .hd {
   flex: 0 0 auto;
-  padding-bottom: 10px;
+  padding-bottom: 8px;
 }
 
 .hd h1 {
   font-size: 17px;
   font-weight: 600;
-  letter-spacing: 0.5px;
+  /* §15 排印：大字号收紧字距，不再额外加正字距 */
+  letter-spacing: 0;
+  color: var(--text);
 }
 
 /* ---------- 卡片 ---------- */
 
 main {
   flex: 1;
+  /* flex 子项默认 min-height:auto，内容一高就不肯收缩，会把底部 footer
+     顶出窗口（高 DPI / 字体偏大时尤其明显）。显式归零，配合 overflow 滚动。 */
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   padding-right: 4px;
@@ -69,24 +87,40 @@ main::-webkit-scrollbar {
 }
 
 main::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
+  background: var(--scroll-thumb);
   border-radius: 4px;
 }
 
 .card {
+  /* 先给一层实色兜底：万一 CSS 变量没解析成功，卡片仍是可辨认的白底，
+     不会整片融进页面底色。深色主题下第二条 var(--card) 会正常覆盖它。 */
+  background: #ffffff;
   background: var(--card);
+  border: 1px solid #e3e8f0;
   border: 1px solid var(--card-line);
-  border-radius: 12px;
-  padding: 2px 14px 8px;
+  border-radius: 14px;
+  box-shadow: var(--card-shadow);
+  /* 垂直内距维持最小值：设置页有"默认窗高下内容必须一屏放下"的硬约束
+     （AC-94 / AC-116），加高的呼吸感只能放在行距之外的地方 */
+  padding: 2px 16px 8px;
   margin-bottom: 10px;
 }
 
+/* 卡片分组标题：中性灰小标题（② 色彩语义——蓝色只表示"可交互 / 单选选中"，
+   标题是结构信息不是交互入口，用灰阶做层级） */
 .card h2 {
   font-size: 11px;
-  font-weight: 500;
-  color: var(--amber);
+  font-weight: 600;
+  color: var(--text-dim);
   letter-spacing: 1px;
-  margin: 10px 0 2px;
+  margin: 8px 0 0;
+  /* 卡片标题就是纯文字：明确清掉可能被 UA / 原生控件样式带上的底色和圆角，
+     避免在某些 Windows 高 DPI 渲染下被画成白色胶囊或带圆形凸起。 */
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .row {
@@ -94,7 +128,7 @@ main::-webkit-scrollbar-thumb {
   align-items: center;
   gap: 14px;
   padding: 9px 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-top: 1px solid var(--row-line);
 }
 
 .row:first-of-type {
@@ -128,10 +162,17 @@ main::-webkit-scrollbar-thumb {
   color: var(--text);
 }
 
+/* 辅助说明文字提到 11px（v1.17 排印：全项目辅助文字下限 11px），
+   行距微收对冲字高增量，内容总高度不变 */
 .k > small {
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-faint);
-  line-height: 1.45;
+  line-height: 1.4;
+}
+
+/* 已有挂件数超过新设的上限时，把这行说明标红，提醒"只拦新增、不删已有" */
+#limit-note.warn {
+  color: var(--danger-text);
 }
 
 .v {
@@ -164,20 +205,25 @@ main::-webkit-scrollbar-thumb {
   flex: 0 0 auto;
   height: 28px;
   padding: 0 12px;
-  border-radius: 7px;
+  border-radius: 8px;
   border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--ctrl-bg);
   color: var(--text-dim);
   font-family: inherit;
   font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
+  /* 关掉 Chromium 的原生按钮外观：高 DPI 下原生控件偶尔会额外画一圈
+     白色圆角/圆形高亮，和我们的实色样式叠在一起会变成"白色胶囊"。 */
+  -webkit-appearance: none;
+  appearance: none;
+  transition: color 0.14s ease, border-color 0.14s ease, background 0.14s ease;
 }
 
 .btn:hover {
-  color: var(--text);
-  border-color: rgba(226, 163, 74, 0.45);
-  background: rgba(255, 255, 255, 0.1);
+  color: var(--accent-strong);
+  border-color: rgba(75, 134, 245, 0.45);
+  background: var(--accent-soft);
 }
 
 .btn:active {
@@ -185,23 +231,27 @@ main::-webkit-scrollbar-thumb {
 }
 
 .btn.danger {
-  color: #f0a396;
-  border-color: rgba(226, 96, 74, 0.32);
-  background: rgba(226, 96, 74, 0.1);
+  color: var(--danger-text);
+  border-color: rgba(226, 96, 74, 0.3);
+  background: var(--danger-soft);
 }
 
 .btn.danger:hover {
-  background: rgba(226, 96, 74, 0.2);
+  background: var(--danger-hover);
 }
 
+/* 主按钮 = 参考图里那一枚蓝色实心按钮 */
 .btn.primary {
-  color: #201607;
-  border-color: rgba(226, 163, 74, 0.6);
-  background: linear-gradient(180deg, var(--amber-soft), var(--amber));
+  color: #ffffff;
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 2px 6px rgba(75, 134, 245, 0.25);
 }
 
 .btn.primary:hover {
-  background: linear-gradient(180deg, #ffdca4, #eab05c);
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  color: #ffffff;
 }
 
 .num {
@@ -215,19 +265,23 @@ main::-webkit-scrollbar-thumb {
 #limit-input {
   width: 84px;
   height: 28px;
-  border-radius: 7px;
+  border-radius: 8px;
   border: 1px solid var(--line);
-  background: rgba(0, 0, 0, 0.32);
+  background: var(--ctrl-bg);
   color: var(--text);
   font-family: inherit;
   font-size: 12.5px;
   padding: 0 8px;
   outline: none;
   text-align: right;
+  /* 同上：数字框也统一走自绘样式，不叠加原生 spinner / 圆角高亮 */
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 #limit-input:focus {
-  border-color: rgba(226, 163, 74, 0.65);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(75, 134, 245, 0.12);
 }
 
 .bar {
@@ -235,7 +289,7 @@ main::-webkit-scrollbar-thumb {
   min-width: 40px;
   height: 5px;
   border-radius: 3px;
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--bar-bg);
   overflow: hidden;
 }
 
@@ -244,7 +298,7 @@ main::-webkit-scrollbar-thumb {
   height: 100%;
   width: 0;
   border-radius: 3px;
-  background: var(--amber);
+  background: var(--accent);
   transition: width 0.18s ease;
 }
 
@@ -256,10 +310,10 @@ kbd {
   font-family: Consolas, "Courier New", monospace;
   font-size: 11.5px;
   color: var(--text);
-  background: rgba(0, 0, 0, 0.35);
+  background: var(--ctrl-bg);
   border: 1px solid var(--line);
   border-bottom-width: 2px;
-  border-radius: 5px;
+  border-radius: 6px;
   padding: 3px 8px;
 }
 
@@ -269,12 +323,13 @@ kbd {
   border: 1px solid var(--line);
   border-radius: 10px;
   padding: 2px 8px;
+  background: var(--ctrl-bg);
 }
 
 .tag.on {
-  color: #9fe0b0;
-  border-color: rgba(90, 200, 120, 0.4);
-  background: rgba(90, 200, 120, 0.1);
+  color: var(--accent-strong);
+  border-color: rgba(75, 134, 245, 0.4);
+  background: var(--accent-soft);
 }
 
 /* ---------- 底部 ---------- */
@@ -294,8 +349,8 @@ kbd {
 }
 
 .status {
-  font-size: 11.5px;
-  color: #9fe0b0;
+  font-size: 12px;
+  color: var(--text-dim);
   max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -303,5 +358,81 @@ kbd {
 }
 
 .status.warn {
-  color: #ffb4a4;
+  color: var(--danger-text);
+}
+
+/* ---------- 分段选择器：主题（v1.10）与件数上限（v1.12） ---------- */
+.theme-picker,
+.limit-picker {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.btn.theme-opt,
+.btn.limit-opt, .btn.seg-opt {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 12px;
+}
+
+/* 件数档位是纯数字：收窄到能在一行里排下 6 档，且数字等宽不跳动 */
+.btn.limit-opt, .btn.seg-opt {
+  min-width: 38px;
+  padding: 0 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.btn.theme-opt .sw {
+  flex: 0 0 12px;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid rgba(128, 136, 150, 0.4);
+}
+
+.sw-light {
+  background: linear-gradient(135deg, #ffffff 0 52%, #4b86f5 52% 100%);
+}
+
+.sw-dark {
+  background: linear-gradient(135deg, #20242e 0 52%, #5b93ff 52% 100%);
+}
+
+/* 选中项 = 蓝色实心，悬停不再覆盖成浅蓝底 */
+.btn.theme-opt.on,
+.btn.theme-opt.on:hover,
+.btn.limit-opt.on,
+.btn.limit-opt.on:hover,
+.btn.seg-opt.on,
+.btn.seg-opt.on:hover {
+  color: #ffffff;
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 2px 6px rgba(75, 134, 245, 0.25);
+}
+
+/* ---------- 深色主题（v1.10） ----------
+   与主界面同一套深灰蓝底 + 提亮蓝强调；只覆写颜色，不改任何控件尺寸。 */
+:root[data-theme="dark"] {
+  --bg: #1b1f28;
+  --card: #262c38;
+  --card-line: #39424f;
+  --line: #353d4a;
+  --text: #e9eef7;
+  --text-dim: #aeb9ca;
+  --text-faint: #7d8899;
+  --accent: #5b93ff;
+  --accent-strong: #8ab4ff;
+  --accent-soft: rgba(91, 147, 255, 0.16);
+  --danger: #f0785f;
+  --danger-soft: rgba(240, 120, 95, 0.15);
+  --danger-text: #ff9c88;
+  --danger-hover: rgba(240, 120, 95, 0.24);
+  --ctrl-bg: #262c38;
+  --row-line: #313947;
+  --scroll-thumb: #495465;
+  --bar-bg: #313947;
+  --card-shadow: 0 2px 8px rgba(0, 0, 0, 0.34);
 }

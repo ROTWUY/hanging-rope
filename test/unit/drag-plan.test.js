@@ -71,3 +71,45 @@ test('空载荷：拒绝拖出', () => {
   assert.equal(plan.ok, false);
   assert.ok(plan.warning.length > 0);
 });
+
+/* ---------------- v1.16 多选整组拖出 ---------------- */
+
+const { planMultiDrag } = require('../../src/main/drag-plan');
+
+test('planMultiDrag：可插入项按顺序保留、文字与丢失项自动跳过', () => {
+  const plan = planMultiDrag(
+    [
+      { kind: 'file', path: 'C:\\tmp\\a.txt' },
+      { kind: 'text', text: '文字' },
+      { kind: 'folder', path: 'C:\\tmp\\dir' },
+      { kind: 'file', path: 'C:\\tmp\\missing.txt' },
+      { kind: 'image', cachePath: 'C:\\tmp\\cache\\img.png' },
+    ],
+    deps
+  );
+  assert.equal(plan.ok, true);
+  assert.deepEqual(plan.targets, ['C:\\tmp\\a.txt', 'C:\\tmp\\dir', 'C:\\tmp\\cache\\img.png']);
+  assert.equal(plan.skipped, 2);
+});
+
+test('planMultiDrag：全部不可插入 → ok=false 且 skipped 计数', () => {
+  const plan = planMultiDrag(
+    [{ kind: 'text', text: 'A' }, { kind: 'file', path: 'C:\\tmp\\nope.txt' }],
+    deps
+  );
+  assert.equal(plan.ok, false);
+  assert.deepEqual(plan.targets, []);
+  assert.equal(plan.skipped, 2);
+});
+
+test('planMultiDrag：空列表 / null 安全 → ok=false 不抛错', () => {
+  assert.equal(planMultiDrag([], deps).ok, false);
+  assert.equal(planMultiDrag(null, deps).ok, false);
+  assert.equal(planMultiDrag(null, deps).skipped, 0);
+});
+
+test('planMultiDrag：快捷方式按解析后的本体带出', () => {
+  const plan = planMultiDrag([{ kind: 'file', path: 'C:\\tmp\\valid.lnk' }], deps);
+  assert.equal(plan.ok, true);
+  assert.deepEqual(plan.targets, ['C:\\tmp\\a.txt']);
+});

@@ -20,8 +20,25 @@ const els = {
 
 let S = { items: [], settings: {}, copyMode: false };
 
+/* 主题：初始那一帧由 head 里的 theme.js 按 URL 上的 query 定好（不闪白），
+   设置窗口切换后主进程把 settings.theme 推过来，这里只负责运行时同步。 */
+function applyThemeFromState(s) {
+  if (window.ropeTheme) window.ropeTheme.apply(s && s.settings && s.settings.theme);
+}
+
+/* 停靠位置（v1.14）：初始由 theme.js 按 URL query 写好 data-pos（不闪布局），
+   运行时随状态推送同步。位置一变，展开中的文件夹面板坐标就失效，顺手收起。 */
+function applyPosFromState(s) {
+  const pos = (s && s.settings && s.settings.ropePosition) || 'top';
+  const cur = document.documentElement.getAttribute('data-pos') || 'top';
+  const next = window.ropeTheme ? window.ropeTheme.applyPos(pos) : pos;
+  if (cur !== next && ui.folder) closeFolder(true);
+}
+
 const ui = {
   removeMode: false,
+  selMode: false, // 多选模式（v1.17）：按钮开启后普通单击即可勾选；Ctrl+点击是独立入口
+  selected: new Set(), // 选中的挂件 id
   press: null, // { item, el, pointerId, x0, y0, lifted, timer } 按住中（文件/文件夹/图片）
   reorder: null, // 抬起后的排序手势（与 press 同一对象）
   textDrag: null, // { el, reordered } 文字挂件的 HTML5 拖拽会话
@@ -52,6 +69,66 @@ function extOf(name) {
 
 /* 图片扩展名：这类"文件"挂件直接渲染原图预览 */
 const IMG_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|ico|avif)$/i;
+
+/* ---------------- Office 文件图标（v1.11） ----------------
+   Word / Excel / PowerPoint 文档不再用通用白纸 + "DOCX" 文字，
+   改用 assets/ 下三款自绘的彩色应用图标。只按扩展名判断（大小写无关），
+   其它格式、图片、文件夹一律保持原逻辑；尺寸与卡片结构不变。 */
+const OFFICE_ICON = Object.freeze({
+  word: '../../assets/office-word.svg',
+  excel: '../../assets/office-excel.svg',
+  powerpoint: '../../assets/office-powerpoint.svg',
+});
+const OFFICE_EXT = Object.freeze({
+  doc: 'word', docx: 'word', docm: 'word', dot: 'word', dotx: 'word', dotm: 'word',
+  xls: 'excel', xlsx: 'excel', xlsm: 'excel', xlsb: 'excel', xlt: 'excel', xltx: 'excel', xltm: 'excel',
+  ppt: 'powerpoint', pptx: 'powerpoint', pptm: 'powerpoint', pps: 'powerpoint',
+  ppsx: 'powerpoint', ppsm: 'powerpoint', pot: 'powerpoint', potx: 'powerpoint', potm: 'powerpoint',
+});
+
+function officeKind(name) {
+  const m = /\.([a-z0-9]{1,6})$/i.exec(name || '');
+  if (!m) return '';
+  const k = m[1].toLowerCase();
+  return Object.prototype.hasOwnProperty.call(OFFICE_EXT, k) ? OFFICE_EXT[k] : '';
+}
+
+function docShape(name) {
+  const doc = document.createElement('div');
+  doc.className = 'doc-shape';
+  doc.textContent = extOf(name) || '文件';
+  return doc;
+}
+
+/* 文件夹图标：v1.14.1 起用 assets/folder.png（用户提供的黄色经典文件夹，
+   透明背景）。加载失败时退回旧 CSS 绘制的 .folder-shape 兜底块。 */
+function folderShape() {
+  const img = document.createElement('img');
+  img.className = 'folder-shape';
+  img.draggable = false;
+  img.alt = '';
+  img.src = '../../assets/folder.png';
+  img.addEventListener('error', () => {
+    if (img.isConnected) img.classList.add('folder-shape-fallback');
+  });
+  return img;
+}
+
+/* 资源缺失（旧成品、手改资源目录）时静默退回通用文档形状，
+   不让 Chromium 画出破图标，也不会影响单击复制 / 拖出等行为。 */
+function officeShape(container, name, kind) {
+  const img = document.createElement('img');
+  img.className = 'office-icon';
+  img.draggable = false;
+  img.alt = '';
+  img.dataset.office = kind;
+  img.addEventListener('error', () => {
+    if (img.isConnected) container.replaceChild(docShape(name), img);
+  });
+  container.appendChild(img);
+  img.src = OFFICE_ICON[kind];
+  return img;
+}
 
 /* 路径比较键（与主进程 src/main/paths.js 同一套规则）：
    Windows 不区分大小写、斜杠方向无关、末尾分隔符可有可无。
@@ -207,6 +284,9 @@ function render() {
   // 而用 animation:none 去压制又会在取消时让动画重播，所以干脆不声明。
   const prevIds = new Set([...els.track.children].map((n) => n.dataset.id));
   els.track.innerHTML = '';
+  // 多选：清掉已经不在绳上的 id（取下 / 清空 / 别处删除）
+  const liveIds = new Set(S.items.map((i) => i.id));
+  for (const id of [...ui.selected]) if (!liveIds.has(id)) ui.selected.delete(id);
   for (const item of S.items) {
     const el = buildItem(item);
     if (!prevIds.has(item.id)) el.classList.add('anim-in');
@@ -230,6 +310,7 @@ function buildItem(item) {
   el.dataset.id = item.id;
   // 只有文字走 HTML5 拖拽；文件/文件夹/图片完全用指针手势（见统一手势说明）
   el.draggable = item.type === 'text';
+  if (ui.selected.has(item.id)) el.classList.add('selected');
 
   const clip = document.createElement('div');
   clip.className = 'clip';
@@ -276,15 +357,15 @@ function buildThumb(container, item) {
     return;
   }
   if (item.type === 'folder') {
-    const f = document.createElement('div');
-    f.className = 'folder-shape';
-    container.appendChild(f);
+    container.appendChild(folderShape());
     return;
   }
-  const doc = document.createElement('div');
-  doc.className = 'doc-shape';
-  doc.textContent = extOf(item.name) || '文件';
-  container.appendChild(doc);
+  const kind = item.type === 'file' ? officeKind(item.name) : '';
+  if (kind) {
+    officeShape(container, item.name, kind);
+    return;
+  }
+  container.appendChild(docShape(item.name));
 }
 
 /* 缩略图加载失败时给一个占位块，而不是让浏览器画出破图标 ——
@@ -406,12 +487,28 @@ function wireItem(el, item) {
 
   /* --- v1.5：单击 = 复制到剪贴板，双击 = 用系统默认程序打开 ---
      双击的第二次 click（detail>=2）跳过，避免连续复制两遍；
-     按住拖动 / 排序 / 拖出 / 取件模式由 clickBlocked() 统一挡掉。 */
+     按住拖动 / 排序 / 拖出 / 取件模式由 clickBlocked() 统一挡掉。
+     v1.17：多选状态下单击/双击语义停用 —— 普通单击 = 勾选/取消勾选，
+     双击不打开；Ctrl+点击仍是独立的多选入口（不开按钮也能直接勾）。 */
   el.addEventListener('click', (e) => {
+    if (e.ctrlKey || e.metaKey) {
+      if (e.detail >= 2) return; // 双击的第二下不当选择
+      toggleSelect(item.id);
+      markClickBlocked(400); // 选完立刻双击的话别误开
+      return;
+    }
+    if (ui.selMode) {
+      // 多选模式：单击就是勾选/取消勾选，不再复制
+      if (e.detail >= 2 || clickBlocked()) return;
+      toggleSelect(item.id);
+      markClickBlocked(400); // 连点会形成双击，统一拦在勾选语义外
+      return;
+    }
     if (e.detail >= 2 || clickBlocked()) return;
     doCopy(targetOfItem(item), itemLabel(item) || item.type);
   });
   el.addEventListener('dblclick', () => {
+    if (ui.selMode) return; // 多选模式下双击打开停用
     if (clickBlocked()) return;
     doOpen(targetOfItem(item), itemLabel(item) || item.type);
   });
@@ -445,13 +542,41 @@ function dragOutFromItem(item) {
   }, 2500);
 }
 
+/* v1.16：多选整组拖出 —— 按绳上顺序逐一带出，插入目标软件（Office /
+   聊天）时按这个顺序逐一插入；文字等不可插入的对象由主进程统一跳过
+   并提示跳过数量。理念不变：只发路径引用（图片发缓存副本），不复制存储。 */
+function dragOutMulti(items) {
+  const list = [];
+  for (const it of items) {
+    if (!it) continue;
+    list.push(
+      it.type === 'image'
+        ? { kind: 'image', cachePath: it.cachePath }
+        : { kind: it.type, path: it.path || '', text: it.text || '' }
+    );
+  }
+  if (!list.length) return;
+  markClickBlocked(2600);
+  ui.nativeDrag = true;
+  ui.lastDragPath = '';
+  ui.lastDragAt = Date.now();
+  rope.startDrag({ kind: 'multi', list });
+  clearTimeout(ui.nativeDragTimer);
+  ui.nativeDragTimer = setTimeout(() => {
+    ui.nativeDrag = false;
+  }, 2500);
+}
+
 function pointInTrack(x, y, margin) {
   const r = els.track.getBoundingClientRect();
   return x >= r.left - margin && x <= r.right + margin && y >= r.top - margin && y <= r.bottom + margin;
 }
 
 function reorderAtPoint(x, y, dragged) {
-  const others = [...els.track.querySelectorAll('.item:not(.lifting)')];
+  // 多选整组拖动时，插入位置只在“组外”的挂件里找（v1.16）
+  const group = (ui.reorder && ui.reorder.group) || null;
+  const inGroup = (n) => (group ? group.includes(n) : n === dragged);
+  const others = [...els.track.querySelectorAll('.item')].filter((n) => !inGroup(n) && !n.classList.contains('lifting'));
   let insertBefore = null;
   for (const n of others) {
     const r = n.getBoundingClientRect();
@@ -462,16 +587,31 @@ function reorderAtPoint(x, y, dragged) {
   }
   // 位置没变就不要再动 DOM：insertBefore 是“移出+插入”，
   // 即便目标位置相同也会让节点重新挂载（动画/悬停状态被打断）。
-  if (insertBefore ? insertBefore === dragged.nextElementSibling : !dragged.nextElementSibling) return;
-  if (insertBefore) els.track.insertBefore(dragged, insertBefore);
-  else els.track.appendChild(dragged);
+  const anchor = group ? group[group.length - 1] : dragged;
+  if (insertBefore ? insertBefore === anchor.nextElementSibling : !anchor.nextElementSibling) return;
+  els.track.insertBefore(dragged, insertBefore);
+  // 组内其余成员按原相对顺序依次跟在拖动件后面
+  if (group) {
+    let prev = dragged;
+    for (const g of group) {
+      if (g === dragged) continue;
+      els.track.insertBefore(g, prev.nextSibling);
+      prev = g;
+    }
+  }
 }
 
 function lift(p) {
   p.lifted = true;
   markClickBlocked(600); // 已"抬起"就属于排序手势，松手后的 click 不复制
   ui.reorder = p;
-  p.el.classList.add('lifting');
+  // 多选：拖动的是选中件 → 整组一起抬起（组内相对顺序 = 绳上顺序）
+  if (ui.selMode && ui.selected.has(p.item.id)) {
+    p.group = selectedEls();
+    for (const g of p.group) g.classList.add('lifting');
+  } else {
+    p.el.classList.add('lifting');
+  }
   document.body.classList.add('reordering');
   rope.busy(true);
 }
@@ -480,7 +620,9 @@ function commitReorder() {
   document.body.classList.remove('reordering');
   markClickBlocked(600);
   if (ui.reorder) {
-    ui.reorder.el.classList.remove('lifting');
+    const r = ui.reorder;
+    if (r.group) for (const g of r.group) g.classList.remove('lifting');
+    else r.el.classList.remove('lifting');
     ui.reorder = null;
   }
   rope.busy(false);
@@ -504,10 +646,14 @@ document.addEventListener('pointermove', (e) => {
   // 扫到窗口左右边界，于是被误判成拖出（系统原生拖拽一起一停，看起来就是闪）。
   const belowWindow = e.clientY > window.innerHeight - 6;
   if (belowWindow) {
-    // 拖出窗口 → 转为对外拖出
+    // 拖出窗口 → 转为对外拖出（多选拖的选中件 = 整组带出，v1.16）
     ui.press = null;
     commitReorder();
-    dragOutFromItem(r.item);
+    if (r.group && r.group.length) {
+      dragOutMulti(r.group.map((n) => findItem(n.dataset.id)));
+    } else {
+      dragOutFromItem(r.item);
+    }
     return;
   }
   reorderAtPoint(e.clientX, e.clientY, r.el);
@@ -552,9 +698,41 @@ function openFolder(item, anchorEl) {
 function positionFolderPanel(anchorEl) {
   const r = anchorEl.getBoundingClientRect();
   const width = 332;
+  const height = 250; // 面板高度估值（头部 + 3 行 + 底注），用于上下方位的避让
+  const pos = document.documentElement.getAttribute('data-pos') || 'top';
+
+  if (pos === 'left') {
+    // 绳在左缘：面板出现在卡片右侧（屏幕内侧）
+    const left = Math.round(r.right + 10);
+    let top = Math.round(r.top - 40);
+    top = Math.max(8, Math.min(top, window.innerHeight - height - 8));
+    els.folderPanel.style.left = left + 'px';
+    els.folderPanel.style.top = top + 'px';
+    return;
+  }
+  if (pos === 'right') {
+    // 绳在右缘：面板出现在卡片左侧
+    const left = Math.round(r.left - width - 10);
+    let top = Math.round(r.top - 40);
+    top = Math.max(8, Math.min(top, window.innerHeight - height - 8));
+    els.folderPanel.style.left = Math.max(8, left) + 'px';
+    els.folderPanel.style.top = top + 'px';
+    return;
+  }
+  if (pos === 'bottom') {
+    // 绳在底边：面板出现在卡片上方（避开卡片与下缘）
+    const left = Math.round(r.left - 60);
+    let top = Math.round(r.top - height - 8);
+    top = Math.max(8, top);
+    els.folderPanel.style.left = Math.max(8, Math.min(left, window.innerWidth - width - 8)) + 'px';
+    els.folderPanel.style.top = top + 'px';
+    return;
+  }
+  // 顶部（默认）：沿用 CSS 的 top:118px，这里只定水平位置
   let left = Math.round(r.left - 60);
   left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
   els.folderPanel.style.left = left + 'px';
+  els.folderPanel.style.top = '';
 }
 
 function cycleFolder(dir) {
@@ -662,11 +840,12 @@ function renderFolderPanel() {
     th.className = 'fp-row-thumb';
     if (!entry.isDir && IMG_EXT_RE.test(entry.name)) {
       thumbImg(th, fileUrl(entry.path), null);
+    } else if (entry.isDir) {
+      th.appendChild(folderShape());
     } else {
-      const shape = document.createElement('div');
-      shape.className = entry.isDir ? 'folder-shape' : 'doc-shape';
-      if (!entry.isDir) shape.textContent = extOf(entry.name) || '文件';
-      th.appendChild(shape);
+      const kind = officeKind(entry.name); // 文件夹面板里 Office 行跟着换图标
+      if (kind) officeShape(th, entry.name, kind);
+      else th.appendChild(docShape(entry.name));
     }
     row.appendChild(th);
 
@@ -891,6 +1070,8 @@ document.addEventListener('drop', async (e) => {
 
 function setRemoveMode(on, fromMain = false) {
   if (ui.removeMode === on) return;
+  // 取件与多选互斥：进取件模式先退出多选
+  if (on && ui.selMode) setSelMode(false);
   ui.removeMode = on;
   document.body.classList.toggle('remove-mode', on);
   els.removeHint.hidden = !on;
@@ -910,6 +1091,11 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   e.preventDefault();
+  // 多选模式开着时，Esc 先退出多选（取件模式退后）
+  if (ui.selMode) {
+    setSelMode(false);
+    return;
+  }
   setRemoveMode(true);
 });
 
@@ -931,6 +1117,55 @@ document.addEventListener('click', (e) => {
 function onRemoveModeEvent(on) {
   setRemoveMode(!!on, true);
 }
+
+/* ---------------- 多选模式（v1.16） ----------------
+   与取件模式同一套手势思路（复用点击拦截 / Esc 退出），但语义互补：
+   · 进入：点「多选」按钮，或直接 Ctrl+点击任意挂件（隐式进入）
+   · 勾选：Ctrl+点击 切换选中；多选状态下普通单击 / 双击语义不变
+     （单击复制 / 双击打开，作用于指针指向的那一件）
+   · 整组拖动：按住选中件抬起 → 整组跟手换位（保持组内相对顺序）
+   · 整组拖出：拖出窗口 → 按绳上顺序逐一插入目标软件，
+     文字等不可插入的对象自动跳过（主进程提示跳过数量）
+   · 退出：再点「多选」按钮，或按 Esc（多选优先于取件模式） */
+
+function itemElById(id) {
+  return [...els.track.children].find((n) => n.dataset.id === id) || null;
+}
+
+function selectedEls() {
+  return [...els.track.children].filter((n) => n.classList.contains('selected'));
+}
+
+function setSelMode(on) {
+  if (ui.selMode === on) return;
+  ui.selMode = on;
+  if (!on) {
+    ui.selected.clear();
+    for (const n of els.track.querySelectorAll('.item.selected')) n.classList.remove('selected');
+  }
+  document.body.classList.toggle('sel-mode', on);
+  const btn = $('#btn-select');
+  if (btn) btn.classList.toggle('on', on);
+}
+
+function toggleSelect(id) {
+  const el = itemElById(id);
+  if (!el) return;
+  if (!ui.selMode) setSelMode(true); // Ctrl 点选隐式进入多选（与按钮开启等效）
+  if (ui.selected.has(id)) {
+    ui.selected.delete(id);
+    el.classList.remove('selected');
+  } else {
+    ui.selected.add(id);
+    el.classList.add('selected');
+  }
+}
+
+$('#btn-select').addEventListener('click', () => {
+  const on = !ui.selMode;
+  setSelMode(on);
+  toast(on ? '多选：点击卡片勾选（Ctrl+点击也可以），拖动整组排序 / 插入；Esc 或再点一次退出' : '已退出多选');
+});
 
 /* ---------------- 设置 ----------------
    设置是独立的普通窗口（主进程 BrowserWindow#openSettingsWindow），
@@ -955,6 +1190,8 @@ els.copyPill.addEventListener('click', () => rope.toggleCopyMode());
 
 rope.onState((s) => {
   S = s;
+  applyThemeFromState(s);
+  applyPosFromState(s);
   render();
   // 绳上状态变了（别处取下 / 拖入 / 清空），展开的面板里 📌 要跟着变
   syncPinButtons();
@@ -990,5 +1227,7 @@ document.addEventListener('mouseleave', () => rope.hover(false));
 /* ---------------- 启动 ---------------- */
 rope.getState().then((s) => {
   S = s;
+  applyThemeFromState(s);
+  applyPosFromState(s);
   render();
 });

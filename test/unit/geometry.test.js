@@ -67,3 +67,117 @@ test('收回判定：离开窗口才收回；悬停/拖拽期间不收回（AC-0
   assert.equal(geo.shouldAutoHide({ x: 300, y: 100 }, winBounds, true, false), false, '鼠标悬停在内容上不收回');
   assert.equal(geo.shouldAutoHide({ x: 300, y: 100 }, winBounds, false, true), false, '拖拽进行中不收回');
 });
+
+/* ---------------- v1.14：四向停靠 ---------------- */
+
+const WA = { x: 0, y: 0, width: 1920, height: 1040 }; // 工作区（底部 40px 任务栏）
+const TH = 210;
+
+test('normalizePosition：只认 4 个方位，非法值回落 top', () => {
+  assert.equal(geo.normalizePosition('top'), 'top');
+  assert.equal(geo.normalizePosition('left'), 'left');
+  assert.equal(geo.normalizePosition('right'), 'right');
+  assert.equal(geo.normalizePosition('bottom'), 'bottom');
+  assert.equal(geo.normalizePosition('TOP'), 'top');
+  assert.equal(geo.normalizePosition(''), 'top');
+  assert.equal(geo.normalizePosition(undefined), 'top');
+  assert.equal(geo.normalizePosition(42), 'top');
+});
+
+test('顶部停靠：与旧接口结果一致（宽度 ÷3 居中、贴屏顶、隐藏在屏外上方）', () => {
+  const g = geo.computeRopeBounds(FS, WA, TH, 'top');
+  assert.equal(g.shown.width, 640);
+  assert.equal(g.shown.x, 640);
+  assert.equal(g.shown.y, 0);
+  assert.equal(g.shown.height, TH);
+  assert.equal(g.hidden.y, -TH);
+  const legacy = geo.computeWindowBounds(FS, TH);
+  assert.deepEqual(g.shown, { x: legacy.x, y: 0, width: legacy.width, height: TH });
+});
+
+test('底部停靠：贴工作区底边（避开任务栏），隐藏在屏幕外下方', () => {
+  const g = geo.computeRopeBounds(FS, WA, TH, 'bottom');
+  assert.equal(g.shown.width, Math.round(WA.width / 3));
+  assert.equal(g.shown.y, WA.y + WA.height - TH, 'y = 工作区底 - 厚度');
+  assert.equal(g.shown.y + TH, 1040, '底边对齐工作区底（任务栏上方）');
+  assert.equal(g.hidden.y, FS.height, '隐藏位置在整屏之外');
+  // 水平居中于工作区
+  assert.ok(Math.abs(g.shown.x + g.shown.width / 2 - WA.width / 2) <= 1);
+});
+
+test('左侧停靠：竖条贴左缘，长度 = 工作区高 ÷2.5 垂直居中，隐藏在屏外左侧', () => {
+  const g = geo.computeRopeBounds(FS, WA, TH, 'left');
+  const len = Math.max(168, Math.round(WA.height / 2.5));
+  assert.equal(g.shown.width, TH);
+  assert.equal(g.shown.height, len);
+  assert.equal(g.shown.x, 0);
+  assert.ok(Math.abs(g.shown.y + len / 2 - WA.height / 2) <= 1, '垂直居中于工作区');
+  assert.equal(g.hidden.x, -TH);
+});
+
+test('右侧停靠：竖条贴工作区右缘，隐藏在屏外右侧', () => {
+  const g = geo.computeRopeBounds(FS, WA, TH, 'right');
+  const len = Math.max(168, Math.round(WA.height / 2.5));
+  assert.equal(g.shown.width, TH);
+  assert.equal(g.shown.x, WA.width - TH, 'x = 工作区右 - 厚度');
+  assert.equal(g.shown.height, len);
+  assert.equal(g.hidden.x, FS.width);
+});
+
+test('左右竖条长度 = 工作区高 ÷2.5；矮屏时保底 168px', () => {
+  const tall = geo.computeRopeBounds(FS, { x: 0, y: 0, width: 1920, height: 1080 }, TH, 'left');
+  assert.equal(tall.shown.height, Math.round(1080 / 2.5), '1080 工作区 → 432');
+
+  const short = geo.computeRopeBounds(FS, { x: 0, y: 0, width: 1366, height: 400 }, TH, 'right');
+  assert.equal(short.shown.height, 168, '400 ÷2.5 = 160 → 保底 168');
+});
+
+test('非法停靠值归一为 top，不抛错', () => {
+  const g = geo.computeRopeBounds(FS, WA, TH, 'diagonal');
+  assert.equal(g.shown.y, 0);
+  assert.equal(g.shown.width, Math.round(FS.width / 3));
+});
+
+test('厚度变化（文件夹面板展开 410）四向都只影响厚度方向', () => {
+  for (const pos of ['top', 'bottom', 'left', 'right']) {
+    const a = geo.computeRopeBounds(FS, WA, TH, pos);
+    const b = geo.computeRopeBounds(FS, WA, 410, pos);
+    if (pos === 'top' || pos === 'bottom') {
+      assert.equal(b.shown.width, a.shown.width, pos + ' 宽度不变');
+      assert.equal(b.shown.height, 410, pos + ' 高度变厚');
+    } else {
+      assert.equal(b.shown.height, a.shown.height, pos + ' 高度不变');
+      assert.equal(b.shown.width, 410, pos + ' 宽度变厚');
+    }
+    // 贴的那条边不动
+    if (pos === 'bottom') assert.equal(b.shown.y + 410, WA.height);
+    if (pos === 'right') assert.equal(b.shown.x + 410, WA.width);
+  }
+});
+
+test('isEdgeHit 四向热区：只认停靠边 + 绳长范围', () => {
+  const g = geo.computeRopeBounds(FS, WA, TH, 'bottom');
+  const bs = g.shown;
+  // 命中：工作区底边、绳宽范围内
+  assert.equal(geo.isEdgeHit({ x: bs.x + 5, y: WA.height - 1 }, FS, WA, bs, 'bottom'), true);
+  // 任务栏里不算（y 超过工作区底）
+  assert.equal(geo.isEdgeHit({ x: bs.x + 5, y: WA.height + 20 }, FS, WA, bs, 'bottom'), false);
+  // 绳宽范围外不算
+  assert.equal(geo.isEdgeHit({ x: bs.x - 5, y: WA.height - 1 }, FS, WA, bs, 'bottom'), false);
+
+  const gl = geo.computeRopeBounds(FS, WA, TH, 'left');
+  const ls = gl.shown;
+  assert.equal(geo.isEdgeHit({ x: 0, y: ls.y + 10 }, FS, WA, ls, 'left'), true);
+  assert.equal(geo.isEdgeHit({ x: 0, y: ls.y - 10 }, FS, WA, ls, 'left'), false, '绳长范围外');
+  assert.equal(geo.isEdgeHit({ x: 30, y: ls.y + 10 }, FS, WA, ls, 'left'), false, '离左缘太远');
+
+  const gr = geo.computeRopeBounds(FS, WA, TH, 'right');
+  const rs = gr.shown;
+  assert.equal(geo.isEdgeHit({ x: WA.width - 1, y: rs.y + 10 }, FS, WA, rs, 'right'), true);
+  assert.equal(geo.isEdgeHit({ x: WA.width - 30, y: rs.y + 10 }, FS, WA, rs, 'right'), false);
+
+  // 顶部沿用旧手感：整屏顶边
+  const gt = geo.computeRopeBounds(FS, WA, TH, 'top');
+  assert.equal(geo.isEdgeHit({ x: gt.shown.x + 5, y: 0 }, FS, WA, gt.shown, 'top'), true);
+  assert.equal(geo.isEdgeHit({ x: gt.shown.x - 5, y: 0 }, FS, WA, gt.shown, 'top'), false);
+});

@@ -241,6 +241,59 @@ test('启动自愈：扩展名正确的不动，缓存目录外的文件绝不�
   assert.equal(store.getItems()[1].cachePath, outside);
 });
 
+test('主题：默认值 light，白名单只有 light/dark（v1.10）', () => {
+  assert.equal(store.DEFAULT_SETTINGS.theme, 'light');
+  assert.deepEqual(store.THEMES, ['light', 'dark']);
+  assert.equal(store.getSettings().theme, 'light');
+  for (const bad of ['neon', '', 'DARK', null, 1, {}, []]) {
+    assert.equal(store.normalizeTheme(bad), 'light');
+  }
+  assert.equal(store.normalizeTheme('dark'), 'dark');
+});
+
+test('主题：只接受白名单值，非法值不覆盖已有选择（AC-80）', () => {
+  assert.equal(store.setSettings({ theme: 'dark' }).theme, 'dark');
+  for (const bad of ['neon', '', 'DARK', null, 1, {}, []]) {
+    assert.equal(store.setSettings({ theme: bad }).theme, 'dark', '非法值 ' + JSON.stringify(bad));
+  }
+  assert.equal(store.setSettings({ theme: 'light' }).theme, 'light');
+});
+
+test('主题：持久化到 state.json 且重新载入后恢复（AC-77/83）', () => {
+  store.setSettings({ theme: 'dark' });
+  store.saveNow();
+  assert.equal(readState().settings.theme, 'dark');
+  store.load();
+  assert.equal(store.getSettings().theme, 'dark');
+});
+
+test('主题：损坏/缺失字段归一为 light，不影响其它设置', () => {
+  fs.writeFileSync(
+    statePath(),
+    JSON.stringify({ version: 1, items: [], settings: { theme: 'cyberpunk', cacheLimitMB: 120 } })
+  );
+  store.load();
+  assert.equal(store.getSettings().theme, 'light');
+  assert.equal(store.getSettings().cacheLimitMB, 120, '归一不能顺手丢掉其它设置');
+
+  fs.writeFileSync(statePath(), JSON.stringify({ version: 1, items: [], settings: {} }));
+  store.load();
+  assert.equal(store.getSettings().theme, 'light');
+});
+
+test('主题：与其它设置合并写入，改缓存上限不会把主题重置（AC-77）', () => {
+  store.setSettings({ theme: 'dark', cacheLimitMB: 88 });
+  assert.equal(store.getSettings().theme, 'dark');
+  assert.equal(store.getSettings().cacheLimitMB, 88);
+  store.setSettings({ cacheLimitMB: 120 });
+  assert.equal(store.getSettings().theme, 'dark');
+  store.saveNow();
+  assert.deepEqual(
+    { theme: readState().settings.theme, limit: readState().settings.cacheLimitMB },
+    { theme: 'dark', limit: 120 }
+  );
+});
+
 test('启动自愈：二次执行幂等（已修好的不会再改）', () => {
   const dirCache = store.cacheDir();
   fs.mkdirSync(dirCache, { recursive: true });
@@ -250,4 +303,88 @@ test('启动自愈：二次执行幂等（已修好的不会再改）', () => {
 
   assert.equal(store.healImageExtensions(), 1);
   assert.equal(store.healImageExtensions(), 0);
+});
+
+/* ---------------- v1.12 件数上限（数据层） ---------------- */
+
+test('件数上限：默认 300，档位白名单 6 档（AC-97）', () => {
+  assert.equal(store.DEFAULT_ITEM_LIMIT, 300);
+  assert.deepEqual(store.ITEM_LIMITS, [200, 300, 350, 400, 450, 500]);
+  assert.equal(store.DEFAULT_SETTINGS.itemLimit, 300);
+  assert.equal(store.getSettings().itemLimit, 300);
+  for (const bad of [199, 301, 999, -1, 0, '300', '', null, {}, [], true]) {
+    assert.equal(store.normalizeItemLimit(bad), 300, '脏值 ' + JSON.stringify(bad));
+  }
+  for (const good of store.ITEM_LIMITS) assert.equal(store.normalizeItemLimit(good), good);
+});
+
+test('件数上限：只接受 6 档，非法 IPC 入参不覆盖已有选择（AC-98）', () => {
+  assert.equal(store.setSettings({ itemLimit: 500 }).itemLimit, 500);
+  for (const bad of [199, 301, 999, 0, '350', '', null, {}, [], true]) {
+    assert.equal(
+      store.setSettings({ itemLimit: bad }).itemLimit,
+      500,
+      '非法值 ' + JSON.stringify(bad) + ' 不应覆盖已有选择'
+    );
+  }
+  assert.equal(store.setSettings({ itemLimit: 200 }).itemLimit, 200);
+});
+
+test('件数上限：持久化到 state.json 且重新载入恢复（AC-99）', () => {
+  store.setSettings({ itemLimit: 450 });
+  store.saveNow();
+  assert.equal(readState().settings.itemLimit, 450);
+  store.load();
+  assert.equal(store.getSettings().itemLimit, 450);
+});
+
+test('件数上限：损坏字段归一为 300，不影响主题/缓存等其它设置（AC-100）', () => {
+  fs.writeFileSync(
+    statePath(),
+    JSON.stringify({
+      version: 1,
+      items: [],
+      settings: { itemLimit: 9999, theme: 'dark', cacheLimitMB: 120 },
+    })
+  );
+  store.load();
+  assert.equal(store.getSettings().itemLimit, 300);
+  assert.equal(store.getSettings().theme, 'dark');
+  assert.equal(store.getSettings().cacheLimitMB, 120);
+});
+
+const fill = (n) => {
+  for (let i = 0; i < n; i++) {
+    store.addItem({ id: 'lim-' + i, type: 'text', text: 'x' + i, addedAt: i });
+  }
+};
+
+test('件数上限：addItem 是最后一道兜底，满额后返回 null（AC-101）', () => {
+  store.setSettings({ itemLimit: 200 });
+  fill(200);
+  assert.equal(store.getItems().length, 200);
+  assert.equal(store.addItem({ id: 'over', type: 'text', text: 'over', addedAt: 999 }), null);
+  assert.equal(store.getItems().length, 200, '被拦的挂件不能写进数据');
+});
+
+test('件数上限：调低上限不删已有挂件，只拦新增（AC-102）', () => {
+  store.setSettings({ itemLimit: 500 });
+  fill(250);
+  store.setSettings({ itemLimit: 200 });
+  assert.equal(store.getItems().length, 250, '已有挂件一件都不能丢');
+  assert.equal(store.addItem({ id: 'over', type: 'text', text: 'over', addedAt: 999 }), null);
+  store.setSettings({ itemLimit: 500 });
+  assert.ok(store.addItem({ id: 'back', type: 'text', text: 'back', addedAt: 998 }), '调高后应能继续挂');
+});
+
+test('件数上限：与主题/缓存上限合并写入互不覆盖（AC-103）', () => {
+  store.setSettings({ itemLimit: 400, theme: 'dark' });
+  assert.equal(store.setSettings({ cacheLimitMB: 88 }).itemLimit, 400);
+  assert.equal(store.setSettings({ theme: 'light' }).itemLimit, 400);
+  store.saveNow();
+  const s = readState().settings;
+  assert.deepEqual(
+    { limit: s.itemLimit, theme: s.theme, cache: s.cacheLimitMB },
+    { limit: 400, theme: 'light', cache: 88 }
+  );
 });

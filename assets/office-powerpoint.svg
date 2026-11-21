@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96" aria-label="PowerPoint">
+  <!-- 仿 Microsoft 365 PowerPoint 图标：橙红渐变圆形 + 折角 L 形 + 左下 P 徽标。
+       纯矢量自绘，未使用任何官方素材；不含桌面快捷方式小箭头。 -->
+  <defs>
+    <linearGradient id="pCircle" x1="0.05" y1="1" x2="0.92" y2="0">
+      <stop offset="0" stop-color="#ff6a95"/>
+      <stop offset="0.32" stop-color="#e53a4c"/>
+      <stop offset="0.68" stop-color="#f4653c"/>
+      <stop offset="1" stop-color="#ffb640"/>
+    </linearGradient>
+    <linearGradient id="pFold" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#d3264a"/>
+      <stop offset="1" stop-color="#e0433a"/>
+    </linearGradient>
+    <linearGradient id="pBadge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#e43c4b"/>
+      <stop offset="1" stop-color="#ac1d38"/>
+    </linearGradient>
+    <clipPath id="pClip"><circle cx="50" cy="44" r="36"/></clipPath>
+  </defs>
+  <g clip-path="url(#pClip)">
+    <circle cx="50" cy="44" r="36" fill="url(#pCircle)"/>
+    <path d="M14 44 V80 H86 V50 Q86 44 80 44 H56 Q50 44 50 38 V8 H14 Z" fill="url(#pFold)" opacity="0.84"/>
+  </g>
+  <rect x="6" y="46" width="42" height="42" rx="10" fill="url(#pBadge)"/>
+  <text x="27" y="77" font-family="Segoe UI, Arial, Helvetica, sans-serif" font-size="30" font-weight="700" fill="#ffffff" text-anchor="middle">P</text>
+</svg>
